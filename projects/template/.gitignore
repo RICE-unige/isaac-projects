@@ -1,0 +1,19 @@
+# Project-local secrets and generated files
+.env
+
+# ROS 2 workspace build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Training output
+artifacts/
+runs/
+wandb/
+checkpoints/
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
