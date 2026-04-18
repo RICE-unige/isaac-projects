@@ -1,0 +1,33 @@
+# User-specific environment files (may contain secrets)
+.env
+
+# Zenoh bridge binaries (downloaded by zenoh/setup.sh — not stored in git)
+zenoh/zenoh-bridge-ros2dds
+zenoh/libzenoh_plugin_ros2dds.so
+zenoh/*.zip
+
+# Python
+*.pyc
+__pycache__/
+
+# ROS 2 workspace build artifacts
+projects/**/ros2_ws/build/
+projects/**/ros2_ws/install/
+projects/**/ros2_ws/log/
+
+# Isaac Sim / Omniverse runtime data (large; not for VCS)
+docker/
+
+# Training output and generated run data
+projects/**/artifacts/
+projects/**/runs/
+projects/**/wandb/
+projects/**/checkpoints/
+*.pt
+*.pth
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
