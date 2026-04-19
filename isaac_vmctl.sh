@@ -35,9 +35,26 @@ COLOR_YELLOW=""
 COLOR_RED=""
 COLOR_CYAN=""
 COLOR_DIM=""
+UI_IS_TTY=0
+UI_SUPPORTS_UNICODE=0
 
 setup_colors() {
-  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  local charset_hint
+  if [[ -t 1 ]]; then
+    UI_IS_TTY=1
+  fi
+
+  charset_hint="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  if command -v locale >/dev/null 2>&1; then
+    charset_hint="$(locale charmap 2>/dev/null || printf '%s' "$charset_hint")"
+  fi
+  case "$charset_hint" in
+    *UTF-8*|*utf8*|*UTF8*)
+      UI_SUPPORTS_UNICODE=1
+      ;;
+  esac
+
+  if [[ "$UI_IS_TTY" -eq 1 && -z "${NO_COLOR:-}" ]]; then
     COLOR_RESET=$'\033[0m'
     COLOR_BOLD=$'\033[1m'
     COLOR_BLUE=$'\033[34m'
@@ -49,11 +66,24 @@ setup_colors() {
   fi
 }
 
+clear_progress_line() {
+  if [[ "$UI_IS_TTY" -eq 1 ]]; then
+    printf '\r\033[2K'
+  fi
+}
+
+show_progress_line() {
+  if [[ "$UI_IS_TTY" -eq 1 ]]; then
+    printf '\r\033[2K%s' "$1"
+  fi
+}
+
 print_message() {
   local color="$1"
   local label="$2"
   local stream="$3"
   shift 3
+  clear_progress_line
   if [[ "$stream" == "stderr" ]]; then
     printf '%b[%s]%b %s\n' "$color" "$label" "$COLOR_RESET" "$*" >&2
   else
@@ -97,19 +127,174 @@ format_duration() {
   fi
 }
 
+repeat_char() {
+  local char="$1"
+  local count="$2"
+  local output=""
+  local i
+  for ((i = 0; i < count; i++)); do
+    output+="$char"
+  done
+  printf '%s' "$output"
+}
+
+spinner_frame() {
+  local index="$1"
+  if [[ "$UI_SUPPORTS_UNICODE" -eq 1 ]]; then
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+    printf '%s' "${frames[$((index % ${#frames[@]}))]}"
+  else
+    local frames=("-" "\\" "|" "/")
+    printf '%s' "${frames[$((index % ${#frames[@]}))]}"
+  fi
+}
+
+status_glyph() {
+  local phase="$1"
+  case "$phase" in
+    success)
+      if [[ "$UI_SUPPORTS_UNICODE" -eq 1 ]]; then
+        printf '✓'
+      else
+        printf 'OK'
+      fi
+      ;;
+    failure)
+      if [[ "$UI_SUPPORTS_UNICODE" -eq 1 ]]; then
+        printf '✕'
+      else
+        printf '!!'
+      fi
+      ;;
+  esac
+}
+
 render_progress_bar() {
   local completed="$1"
   local total="$2"
-  local width=24
+  local phase="${3:-complete}"
+  local spinner_index="${4:-0}"
+  local width=26
   local filled=0
+  local fill_char empty_char active_char
   if (( total > 0 )); then
     filled=$((completed * width / total))
   fi
+
+  if [[ "$UI_SUPPORTS_UNICODE" -eq 1 ]]; then
+    fill_char="█"
+    empty_char="░"
+    if (( spinner_index % 2 == 0 )); then
+      active_char="▓"
+    else
+      active_char="▒"
+    fi
+  else
+    fill_char="="
+    empty_char="-"
+    active_char=">"
+  fi
+
   local empty=$((width - filled))
-  local filled_bar empty_bar
-  filled_bar=$(printf '%*s' "$filled" '' | tr ' ' '#')
-  empty_bar=$(printf '%*s' "$empty" '' | tr ' ' '-')
-  printf '%s[%s%s]%s %d/%d' "$COLOR_CYAN" "$filled_bar" "$empty_bar" "$COLOR_RESET" "$completed" "$total"
+  local bar
+  bar="$(repeat_char "$fill_char" "$filled")"
+  if [[ "$phase" == "active" && filled < width ]]; then
+    bar+="$active_char"
+    bar+="$(repeat_char "$empty_char" "$((width - filled - 1))")"
+  else
+    bar+="$(repeat_char "$empty_char" "$empty")"
+  fi
+  printf '%s[%s]%s' "$COLOR_CYAN" "$bar" "$COLOR_RESET"
+}
+
+render_install_status_line() {
+  local phase="$1"
+  local total="$2"
+  local index="$3"
+  local label="$4"
+  local elapsed_seconds="$5"
+  local spinner_index="${6:-0}"
+  local mark mark_color bar progress_count
+
+  case "$phase" in
+    active)
+      mark="$(spinner_frame "$spinner_index")"
+      mark_color="$COLOR_BLUE"
+      progress_count=$((index - 1))
+      bar="$(render_progress_bar "$progress_count" "$total" active "$spinner_index")"
+      ;;
+    success)
+      mark="$(status_glyph success)"
+      mark_color="$COLOR_GREEN"
+      progress_count="$index"
+      bar="$(render_progress_bar "$progress_count" "$total")"
+      ;;
+    failure)
+      mark="$(status_glyph failure)"
+      mark_color="$COLOR_RED"
+      progress_count=$((index - 1))
+      bar="$(render_progress_bar "$progress_count" "$total")"
+      ;;
+    *)
+      mark="?"
+      mark_color="$COLOR_YELLOW"
+      progress_count=$((index - 1))
+      bar="$(render_progress_bar "$progress_count" "$total")"
+      ;;
+  esac
+
+  printf '%b%s%b %s  %s  %d/%d  %b%s%b' \
+    "$mark_color" "$mark" "$COLOR_RESET" \
+    "$label" \
+    "$bar" \
+    "$index" "$total" \
+    "$COLOR_DIM" "$(format_duration "$elapsed_seconds")" "$COLOR_RESET"
+}
+
+use_live_progress_ui() {
+  [[ "$VERBOSE" -eq 0 && "$UI_IS_TTY" -eq 1 ]]
+}
+
+print_live_status_line() {
+  local stream="${2:-stdout}"
+  clear_progress_line
+  if [[ "$stream" == "stderr" ]]; then
+    printf '%s\n' "$1" >&2
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+start_install_spinner() {
+  local total="$1"
+  local index="$2"
+  local label="$3"
+
+  if ! use_live_progress_ui; then
+    return 0
+  fi
+
+  (
+    trap 'exit 0' TERM INT
+    local spinner_index=0
+    local started_at=$SECONDS
+    while :; do
+      show_progress_line "$(render_install_status_line active "$total" "$index" "$label" "$((SECONDS - started_at))" "$spinner_index")"
+      sleep 0.12
+      spinner_index=$((spinner_index + 1))
+    done
+  ) &
+  INSTALL_SPINNER_PID=$!
+}
+
+stop_install_spinner() {
+  local spinner_pid="${INSTALL_SPINNER_PID:-}"
+  if [[ -n "$spinner_pid" ]]; then
+    kill "$spinner_pid" 2>/dev/null || true
+    wait "$spinner_pid" 2>/dev/null || true
+    INSTALL_SPINNER_PID=""
+  fi
+  clear_progress_line
 }
 
 parse_common_flags() {
@@ -185,8 +370,10 @@ show_install_log_hint() {
 }
 
 run_logged() {
-  local label="$1"
-  shift
+  local total="$1"
+  local index="$2"
+  local label="$3"
+  shift 3
 
   {
     printf '\n[%s] %s\n' "$(timestamp_utc)" "$label"
@@ -199,10 +386,15 @@ run_logged() {
     return $?
   fi
 
+  local exit_code=0
+  start_install_spinner "$total" "$index" "$label"
   if "$@" >>"$ACTIVE_LOG_FILE" 2>&1; then
-    return 0
+    exit_code=0
+  else
+    exit_code=$?
   fi
-  return $?
+  stop_install_spinner
+  return "$exit_code"
 }
 
 run_install_step() {
@@ -212,12 +404,22 @@ run_install_step() {
   shift 3
 
   local started_at=$SECONDS
-  info "$(render_progress_bar "$((index - 1))" "$total") Step ${index}/${total}: ${label}"
-  if run_logged "$label" "$@"; then
-    success "$(render_progress_bar "$index" "$total") Completed: ${label} ($(format_duration "$((SECONDS - started_at))"))"
+  if ! use_live_progress_ui; then
+    info "Step ${index}/${total}: ${label}  $(render_progress_bar "$((index - 1))" "$total")"
+  fi
+
+  if run_logged "$total" "$index" "$label" "$@"; then
+    if use_live_progress_ui; then
+      print_live_status_line "$(render_install_status_line success "$total" "$index" "$label" "$((SECONDS - started_at))")"
+    else
+      success "Completed: ${label}  $(render_progress_bar "$index" "$total")  $(format_duration "$((SECONDS - started_at))")"
+    fi
     return 0
   fi
 
+  if use_live_progress_ui; then
+    print_live_status_line "$(render_install_status_line failure "$total" "$index" "$label" "$((SECONDS - started_at))")" stderr
+  fi
   if [[ "$VERBOSE" -eq 0 ]]; then
     warn "Last 25 log lines:"
     tail -n 25 "$ACTIVE_LOG_FILE" >&2 || true
