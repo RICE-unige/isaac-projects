@@ -233,7 +233,8 @@ Usage:
   ${SCRIPT_NAME} start isaacsim      Start Isaac Sim with WebRTC.
   ${SCRIPT_NAME} start isaacsim --headless
                                  Start Isaac Sim without WebRTC flags.
-  ${SCRIPT_NAME} run -- <command>    Run a one-shot command inside the Isaac Sim container image.
+  ${SCRIPT_NAME} run [--livestream public|private] [--enable-cameras] [--public-ip <ip>] -- <command>
+                                 Run a one-shot command inside the Isaac Sim container image.
   ${SCRIPT_NAME} stop isaacsim       Stop the Isaac Sim container.
   ${SCRIPT_NAME} restart isaacsim    Restart Isaac Sim.
   ${SCRIPT_NAME} status              Show VM / Docker / Isaac Sim / ROS status.
@@ -275,6 +276,8 @@ Examples:
   ${SCRIPT_NAME} start isaacsim
   ${SCRIPT_NAME} start isaacsim --headless
   ${SCRIPT_NAME} run -- bash -lc 'cd projects/my-project && python train.py'
+  ${SCRIPT_NAME} run --livestream public -- bash -lc 'cd external/IsaacLab && ./isaaclab.sh -p scripts/tutorials/00_sim/launch_app.py'
+  ${SCRIPT_NAME} run --livestream public --enable-cameras -- bash -lc 'cd external/IsaacLab && ./isaaclab.sh -p scripts/demos/quadrupeds.py'
   ROS_INSTALL_VARIANT=desktop ${SCRIPT_NAME} install ros2
   ${SCRIPT_NAME} install docker --log-file /tmp/isaac-bootstrap.log
   ALLOWED_CLIENT_IP=203.0.113.5 ${SCRIPT_NAME} start isaacsim
@@ -895,20 +898,87 @@ check_connectivity() {
 }
 
 run_in_isaac_container() {
-  if [[ "${1:-}" == "--" ]]; then
-    shift
-  fi
-  [[ $# -gt 0 ]] || error "Usage: ${SCRIPT_NAME} run -- <command>"
+  local livestream_mode="0"
+  local enable_cameras="0"
+  local public_ip=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --livestream)
+        [[ $# -ge 2 ]] || error "--livestream requires 'public' or 'private'."
+        case "$2" in
+          public) livestream_mode="1" ;;
+          private) livestream_mode="2" ;;
+          *) error "--livestream must be 'public' or 'private'." ;;
+        esac
+        shift 2
+        ;;
+      --enable-cameras)
+        enable_cameras="1"
+        shift
+        ;;
+      --public-ip)
+        [[ $# -ge 2 ]] || error "--public-ip requires an IPv4 or hostname value."
+        public_ip="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        error "Usage: ${SCRIPT_NAME} run [--livestream public|private] [--enable-cameras] [--public-ip <ip>] -- <command>"
+        ;;
+    esac
+  done
+
+  [[ $# -gt 0 ]] || error "Usage: ${SCRIPT_NAME} run [--livestream public|private] [--enable-cameras] [--public-ip <ip>] -- <command>"
 
   require_supported_host
   init_paths
   verify_nvidia_container_runtime
   ensure_isaac_dirs
   ensure_isaac_image
+  if [[ "$livestream_mode" != "0" ]]; then
+    configure_ufw_if_active
+  fi
   build_common_docker_args
+
+  if [[ "$livestream_mode" != "0" ]]; then
+    DOCKER_RUN_ARGS+=(-e "LIVESTREAM=${livestream_mode}")
+    if [[ "$livestream_mode" == "1" ]]; then
+      if [[ -z "$public_ip" ]]; then
+        public_ip=$(get_public_ip)
+      fi
+      DOCKER_RUN_ARGS+=(-e "PUBLIC_IP=${public_ip}")
+    elif [[ -n "$public_ip" ]]; then
+      DOCKER_RUN_ARGS+=(-e "PUBLIC_IP=${public_ip}")
+    fi
+  fi
+
+  if [[ "$enable_cameras" == "1" ]]; then
+    DOCKER_RUN_ARGS+=(-e "ENABLE_CAMERAS=1")
+  fi
 
   info "Running one-shot command in ${ISAAC_IMAGE}..."
   info "Workspace: ${HOST_WORKSPACE_ROOT} -> ${CONTAINER_WORKSPACE}"
+  if [[ "$livestream_mode" == "1" ]]; then
+    info "Isaac Lab livestream mode: public WebRTC"
+    info "Connect the Isaac Sim WebRTC client to: ${public_ip}"
+    info "Required ports on the host: ${WEBRTC_SIGNAL_PORT}/tcp and ${WEBRTC_STREAM_PORT}/udp"
+    info "If this IP is wrong for your cloud provider or VPN setup, rerun with --public-ip <reachable-ip>."
+  elif [[ "$livestream_mode" == "2" ]]; then
+    info "Isaac Lab livestream mode: private/local WebRTC"
+    if [[ -n "$public_ip" ]]; then
+      info "Configured reachable client target: ${public_ip}"
+    else
+      info "Use the host IP reachable from your laptop in the Isaac Sim WebRTC client."
+    fi
+    info "Required ports on the host: ${WEBRTC_SIGNAL_PORT}/tcp and ${WEBRTC_STREAM_PORT}/udp"
+  fi
+  if [[ "$enable_cameras" == "1" ]]; then
+    info "ENABLE_CAMERAS=1 will be set inside the container."
+  fi
   docker_cmd run --rm \
     "${DOCKER_RUN_ARGS[@]}" \
     "$ISAAC_IMAGE" \
