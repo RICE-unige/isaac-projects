@@ -1,5 +1,6 @@
 # User-specific environment files (may contain secrets)
 .env
+.save-restore/
 
 # Zenoh bridge binaries (downloaded by zenoh/setup.sh — not stored in git)
 zenoh/zenoh-bridge-ros2dds
