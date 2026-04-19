@@ -177,7 +177,7 @@ require_docker_runtime() {
 
 ensure_common_apt_bits() {
   as_root apt-get update -y
-  as_root apt-get install -y ca-certificates curl gnupg software-properties-common lsb-release iproute2 net-tools netcat-openbsd
+  as_root apt-get install -y ca-certificates curl gnupg software-properties-common lsb-release iproute2 net-tools netcat-openbsd rsync
 }
 
 ensure_nvidia_driver_present() {
