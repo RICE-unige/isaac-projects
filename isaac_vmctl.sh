@@ -21,17 +21,215 @@ HOST_WORKSPACE_ROOT="${HOST_WORKSPACE_ROOT:-$SCRIPT_DIR}"
 CONTAINER_WORKSPACE="${CONTAINER_WORKSPACE:-/workspace/isaac-projects}"
 CONTAINER_UID="${CONTAINER_UID:-}"
 CONTAINER_GID="${CONTAINER_GID:-}"
+VERBOSE=0
+LOG_FILE="${LOG_FILE:-}"
+ACTIVE_LOG_FILE=""
+INVOCATION_STRING="$SCRIPT_NAME"
+DOCKER_GROUP_RELOGIN_REQUIRED=0
 
-trap 'echo "[ERROR] ${SCRIPT_NAME}: line ${LINENO}: command failed: ${BASH_COMMAND}" >&2' ERR
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_BLUE=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_RED=""
+COLOR_CYAN=""
+COLOR_DIM=""
 
-info()  { printf '[INFO] %s\n' "$*"; }
-warn()  { printf '[WARN] %s\n' "$*" >&2; }
-error() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+setup_colors() {
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    COLOR_RESET=$'\033[0m'
+    COLOR_BOLD=$'\033[1m'
+    COLOR_BLUE=$'\033[34m'
+    COLOR_GREEN=$'\033[32m'
+    COLOR_YELLOW=$'\033[33m'
+    COLOR_RED=$'\033[31m'
+    COLOR_CYAN=$'\033[36m'
+    COLOR_DIM=$'\033[2m'
+  fi
+}
+
+print_message() {
+  local color="$1"
+  local label="$2"
+  local stream="$3"
+  shift 3
+  if [[ "$stream" == "stderr" ]]; then
+    printf '%b[%s]%b %s\n' "$color" "$label" "$COLOR_RESET" "$*" >&2
+  else
+    printf '%b[%s]%b %s\n' "$color" "$label" "$COLOR_RESET" "$*"
+  fi
+}
+
+info()    { print_message "$COLOR_BLUE" "INFO" stdout "$*"; }
+success() { print_message "$COLOR_GREEN" "OK" stdout "$*"; }
+warn()    { print_message "$COLOR_YELLOW" "WARN" stderr "$*"; }
+error()   { print_message "$COLOR_RED" "ERROR" stderr "$*"; exit 1; }
+
+unexpected_error() {
+  local exit_code=$?
+  local line="$1"
+  local command="$2"
+  local message="${SCRIPT_NAME}: line ${line}: command failed: ${command}"
+  if [[ -n "$ACTIVE_LOG_FILE" ]]; then
+    message="${message}. See ${ACTIVE_LOG_FILE}"
+  fi
+  print_message "$COLOR_RED" "ERROR" stderr "$message"
+  exit "$exit_code"
+}
+
+trap 'unexpected_error "${LINENO}" "${BASH_COMMAND}"' ERR
+
+timestamp_utc() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+timestamp_compact_utc() {
+  date -u +%Y%m%dT%H%M%SZ
+}
+
+format_duration() {
+  local seconds="$1"
+  if (( seconds < 60 )); then
+    printf '%ss' "$seconds"
+  else
+    printf '%sm%02ss' "$((seconds / 60))" "$((seconds % 60))"
+  fi
+}
+
+render_progress_bar() {
+  local completed="$1"
+  local total="$2"
+  local width=24
+  local filled=0
+  if (( total > 0 )); then
+    filled=$((completed * width / total))
+  fi
+  local empty=$((width - filled))
+  local filled_bar empty_bar
+  filled_bar=$(printf '%*s' "$filled" '' | tr ' ' '#')
+  empty_bar=$(printf '%*s' "$empty" '' | tr ' ' '-')
+  printf '%s[%s%s]%s %d/%d' "$COLOR_CYAN" "$filled_bar" "$empty_bar" "$COLOR_RESET" "$completed" "$total"
+}
+
+parse_common_flags() {
+  local -a parsed=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --verbose|-v)
+        VERBOSE=1
+        ;;
+      --log-file)
+        [[ $# -ge 2 ]] || error "--log-file requires a path."
+        LOG_FILE="$2"
+        shift
+        ;;
+      *)
+        parsed+=("$1")
+        ;;
+    esac
+    shift
+  done
+  PARSED_ARGS=("${parsed[@]}")
+}
+
+parse_leading_common_flags() {
+  local -a remaining=("$@")
+  while [[ ${#remaining[@]} -gt 0 ]]; do
+    case "${remaining[0]}" in
+      --verbose|-v)
+        VERBOSE=1
+        remaining=("${remaining[@]:1}")
+        ;;
+      --log-file)
+        [[ ${#remaining[@]} -ge 2 ]] || error "--log-file requires a path."
+        LOG_FILE="${remaining[1]}"
+        remaining=("${remaining[@]:2}")
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  PARSED_ARGS=("${remaining[@]}")
+}
+
+prepare_log_file() {
+  local label="$1"
+  if [[ -n "$ACTIVE_LOG_FILE" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$LOG_FILE" ]]; then
+    ACTIVE_LOG_FILE="$LOG_FILE"
+  else
+    local log_root
+    log_root="$(home_dir)/.local/state/isaac-projects/logs"
+    ACTIVE_LOG_FILE="${log_root}/${label}_$(timestamp_compact_utc).log"
+  fi
+
+  mkdir -p "$(dirname "$ACTIVE_LOG_FILE")"
+  : >"$ACTIVE_LOG_FILE"
+  {
+    printf '[%s] Command: %s\n' "$(timestamp_utc)" "$INVOCATION_STRING"
+    printf '[%s] Log mode: %s\n' "$(timestamp_utc)" "$([[ "$VERBOSE" -eq 1 ]] && printf 'verbose' || printf 'summary')"
+  } >>"$ACTIVE_LOG_FILE"
+}
+
+show_install_log_hint() {
+  local label="$1"
+  info "${label} log: ${ACTIVE_LOG_FILE}"
+  if [[ "$VERBOSE" -eq 0 ]]; then
+    info "Use --verbose to stream the full installer output, or run: tail -f ${ACTIVE_LOG_FILE}"
+  fi
+}
+
+run_logged() {
+  local label="$1"
+  shift
+
+  {
+    printf '\n[%s] %s\n' "$(timestamp_utc)" "$label"
+  } >>"$ACTIVE_LOG_FILE"
+
+  if [[ "$VERBOSE" -eq 1 ]]; then
+    if "$@" > >(tee -a "$ACTIVE_LOG_FILE") 2> >(tee -a "$ACTIVE_LOG_FILE" >&2); then
+      return 0
+    fi
+    return $?
+  fi
+
+  if "$@" >>"$ACTIVE_LOG_FILE" 2>&1; then
+    return 0
+  fi
+  return $?
+}
+
+run_install_step() {
+  local total="$1"
+  local index="$2"
+  local label="$3"
+  shift 3
+
+  local started_at=$SECONDS
+  info "$(render_progress_bar "$((index - 1))" "$total") Step ${index}/${total}: ${label}"
+  if run_logged "$label" "$@"; then
+    success "$(render_progress_bar "$index" "$total") Completed: ${label} ($(format_duration "$((SECONDS - started_at))"))"
+    return 0
+  fi
+
+  if [[ "$VERBOSE" -eq 0 ]]; then
+    warn "Last 25 log lines:"
+    tail -n 25 "$ACTIVE_LOG_FILE" >&2 || true
+  fi
+  error "Failed during '${label}'. Full log: ${ACTIVE_LOG_FILE}"
+}
 
 usage() {
   cat <<USAGE
 Usage:
-  ${SCRIPT_NAME} bootstrap           Install/repair Docker, NVIDIA runtime, ROS 2, and pull the Isaac Sim image.
+  ${SCRIPT_NAME} bootstrap [--verbose] [--log-file <path>]
+                                 Install/repair Docker, NVIDIA runtime, ROS 2, and pull the Isaac Sim image.
   ${SCRIPT_NAME} start isaacsim      Start Isaac Sim with WebRTC.
   ${SCRIPT_NAME} start isaacsim --headless
                                  Start Isaac Sim without WebRTC flags.
@@ -41,9 +239,12 @@ Usage:
   ${SCRIPT_NAME} status              Show VM / Docker / Isaac Sim / ROS status.
   ${SCRIPT_NAME} logs                Show Isaac Sim container logs.
   ${SCRIPT_NAME} shell               Open a shell in the running Isaac Sim container.
-  ${SCRIPT_NAME} install all         Install/repair Docker, NVIDIA container runtime, ROS 2, and Isaac Sim image.
-  ${SCRIPT_NAME} install ros2        Install/repair ROS 2 only.
-  ${SCRIPT_NAME} install docker      Install/repair Docker + NVIDIA container runtime only.
+  ${SCRIPT_NAME} install all [--verbose] [--log-file <path>]
+                                 Install/repair Docker, NVIDIA container runtime, ROS 2, and Isaac Sim image.
+  ${SCRIPT_NAME} install ros2 [--verbose] [--log-file <path>]
+                                 Install/repair ROS 2 only.
+  ${SCRIPT_NAME} install docker [--verbose] [--log-file <path>]
+                                 Install/repair Docker + NVIDIA container runtime only.
   ${SCRIPT_NAME} check               Show listener checks and client-side test commands.
   ${SCRIPT_NAME} help                Show this help.
 
@@ -55,7 +256,7 @@ Optional environment variables:
   WEBRTC_STREAM_PORT=47998
   ROS_INSTALL_VARIANT=ros-base|desktop
   ROS_DOMAIN_ID=0
-  HOST_WORKSPACE_ROOT=${SCRIPT_DIR}
+  HOST_WORKSPACE_ROOT=<repo-root>
   CONTAINER_WORKSPACE=/workspace/isaac-projects
   CONTAINER_UID=<host-uid>            # optional; defaults to current user
   CONTAINER_GID=<host-gid>            # optional; defaults to current user
@@ -64,12 +265,18 @@ Optional environment variables:
   ISAAC_EXTRA_ARGS='<extra Isaac Sim args>'
   NGC_API_KEY=<your-ngc-api-key>       # optional, only used if image pull requires login
 
+Optional flags:
+  --verbose, -v                      Stream detailed bootstrap/install logs live.
+  --log-file <path>                  Write bootstrap/install logs to a specific file.
+
 Examples:
   ${SCRIPT_NAME} bootstrap
+  ${SCRIPT_NAME} bootstrap --verbose
   ${SCRIPT_NAME} start isaacsim
   ${SCRIPT_NAME} start isaacsim --headless
   ${SCRIPT_NAME} run -- bash -lc 'cd projects/my-project && python train.py'
   ROS_INSTALL_VARIANT=desktop ${SCRIPT_NAME} install ros2
+  ${SCRIPT_NAME} install docker --log-file /tmp/isaac-bootstrap.log
   ALLOWED_CLIENT_IP=203.0.113.5 ${SCRIPT_NAME} start isaacsim
   ISAAC_IMAGE=nvcr.io/nvidia/isaac-sim:6.0.0-dev2 ${SCRIPT_NAME} restart isaacsim
 USAGE
@@ -224,6 +431,7 @@ DOCKERREPO"
   if getent group docker >/dev/null 2>&1; then
     if ! id -nG "$user" | tr ' ' '\n' | grep -qx docker; then
       as_root usermod -aG docker "$user" || true
+      DOCKER_GROUP_RELOGIN_REQUIRED=1
       warn "Added ${user} to docker group. A new shell/login is needed before plain 'docker' works without sudo."
     fi
   fi
@@ -707,17 +915,60 @@ run_in_isaac_container() {
     "$@"
 }
 
-install_all() {
+prepare_host_context() {
   require_supported_host
   init_paths
-  ensure_nvidia_container_runtime
-  ensure_ros2_installed
-  ensure_isaac_dirs
-  ensure_isaac_image
-  info "All components are installed or already present."
+}
+
+begin_install_session() {
+  local label="$1"
+  prepare_log_file "$label"
+  info "Installer output is summarized in the terminal."
+  show_install_log_hint "$label"
+}
+
+print_install_success_summary() {
+  local label="$1"
+  success "${label} completed successfully."
+  info "Detailed log: ${ACTIVE_LOG_FILE}"
+  if [[ "$DOCKER_GROUP_RELOGIN_REQUIRED" -eq 1 ]]; then
+    warn "Docker group membership changed during install. Open a new shell before running plain 'docker' without sudo."
+  fi
+}
+
+install_docker_stack() {
+  begin_install_session "install-docker"
+  run_install_step 2 1 "Validate host and workspace settings" prepare_host_context
+  run_install_step 2 2 "Install or verify Docker and NVIDIA Container Toolkit" ensure_nvidia_container_runtime
+  print_install_success_summary "Docker and NVIDIA runtime setup"
+}
+
+install_ros2_stack() {
+  begin_install_session "install-ros2"
+  run_install_step 2 1 "Validate host and workspace settings" prepare_host_context
+  run_install_step 2 2 "Install or verify ROS 2" ensure_ros2_installed
+  print_install_success_summary "ROS 2 setup"
+}
+
+install_all() {
+  begin_install_session "bootstrap"
+  run_install_step 5 1 "Validate host and workspace settings" prepare_host_context
+  run_install_step 5 2 "Install or verify Docker and NVIDIA Container Toolkit" ensure_nvidia_container_runtime
+  run_install_step 5 3 "Install or verify ROS 2" ensure_ros2_installed
+  run_install_step 5 4 "Prepare Isaac Sim cache and data directories" ensure_isaac_dirs
+  run_install_step 5 5 "Pull or verify the Isaac Sim container image" ensure_isaac_image
+  print_install_success_summary "Bootstrap"
 }
 
 main() {
+  setup_colors
+  parse_leading_common_flags "$@"
+  set -- "${PARSED_ARGS[@]}"
+  INVOCATION_STRING="${SCRIPT_NAME}"
+  if [[ $# -gt 0 ]]; then
+    INVOCATION_STRING+=" $*"
+  fi
+
   local cmd=${1:-help}
   local sub=${2:-}
 
@@ -742,6 +993,9 @@ main() {
       run_in_isaac_container "$@"
       ;;
     bootstrap)
+      shift
+      parse_common_flags "$@"
+      [[ ${#PARSED_ARGS[@]} -eq 0 ]] || error "Usage: ${SCRIPT_NAME} bootstrap [--verbose] [--log-file <path>]"
       install_all
       ;;
     status)
@@ -758,9 +1012,24 @@ main() {
       ;;
     install)
       case "$sub" in
-        all) install_all ;;
-        ros2) ensure_ros2_installed ;;
-        docker) ensure_nvidia_container_runtime ;;
+        all)
+          shift 2
+          parse_common_flags "$@"
+          [[ ${#PARSED_ARGS[@]} -eq 0 ]] || error "Usage: ${SCRIPT_NAME} install all [--verbose] [--log-file <path>]"
+          install_all
+          ;;
+        ros2)
+          shift 2
+          parse_common_flags "$@"
+          [[ ${#PARSED_ARGS[@]} -eq 0 ]] || error "Usage: ${SCRIPT_NAME} install ros2 [--verbose] [--log-file <path>]"
+          install_ros2_stack
+          ;;
+        docker)
+          shift 2
+          parse_common_flags "$@"
+          [[ ${#PARSED_ARGS[@]} -eq 0 ]] || error "Usage: ${SCRIPT_NAME} install docker [--verbose] [--log-file <path>]"
+          install_docker_stack
+          ;;
         *) error "Usage: ${SCRIPT_NAME} install {all|ros2|docker}" ;;
       esac
       ;;
