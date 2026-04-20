@@ -62,9 +62,12 @@ cp .env.example .env
 ```
 
 Edit `.env` if your supervisor gives you specific values. Then start the path
-that matches your machine.
+that matches your machine. `isaac_vmctl.sh` only uses environment variables
+that are already sourced in the current shell. Use `.env` for the default
+WebRTC or headless path, and use the files under `configs/` when the workflow
+below calls for a pinned Isaac Sim version or the TigerVNC desktop overlay.
 
-**Fresh Server Bootstrap**
+### Fresh Server Bootstrap
 
 ```bash
 source .env
@@ -75,12 +78,29 @@ Run this once on each new cloud server. After that, use `start` or `run`
 commands without reinstalling host packages. Use
 `./isaac_vmctl.sh bootstrap --verbose` when you want the full installer output
 streamed live; the default mode writes a detailed log file and prints its path.
+If you are using a pinned config or the TigerVNC workflow, source those files
+before `bootstrap` instead of relying only on `.env`.
 
-**SimplePod: Optional TigerVNC Desktop**
+### Workflow Summary
+
+- SimplePod + TigerVNC desktop: bootstrap the TigerVNC desktop once, connect
+  with TigerVNC Viewer, then run `./isaac_vmctl.sh start isaacsim --gui` from
+  the terminal inside that desktop.
+- SimplePod + WebRTC: run `./isaac_vmctl.sh start isaacsim` on the server and
+  connect with the NVIDIA Isaac Sim WebRTC Streaming Client.
+- Vast.ai headless: run `./isaac_vmctl.sh start isaacsim --headless` when no
+  viewport is needed.
+- Isaac Lab remote UI: run the Isaac Lab command with
+  `./isaac_vmctl.sh run --livestream public -- ...` so the script itself owns
+  the WebRTC session.
+
+### SimplePod with TigerVNC Desktop
 
 Use this when you want a full remote Linux desktop and plan to run Isaac Sim
 through that desktop instead of through the WebRTC client. SimplePod must allow
 inbound TCP `5901`, or the custom port you set in `TIGERVNC_PORT`.
+
+First, bootstrap the desktop on the server:
 
 ```bash
 source configs/isaac-sim-5.1.0.env
@@ -109,26 +129,32 @@ If `ufw` is active and `ALLOWED_CLIENT_IP` is set, bootstrap restricts the VNC
 port to that IP. This does not configure SimplePod provider-side port rules;
 open TCP `5901` in SimplePod before connecting.
 
-To run the native Isaac Sim UI inside that VNC desktop instead of using the
-WebRTC client, open the terminal inside the VNC desktop and start Isaac Sim
-with the GUI mode:
+Then, from the terminal inside that VNC desktop, start Isaac Sim in GUI mode:
 
 ```bash
 cd ~/isaac-projects
 source configs/isaac-sim-5.1.0.env
 source configs/simplepod-tigervnc.env
 ./isaac_vmctl.sh start isaacsim --gui
+./isaac_vmctl.sh check
 ```
 
 This starts the Isaac Sim container with access to the current X display from
 that terminal session. Use the TigerVNC Viewer window as the Isaac Sim UI;
-WebRTC ports are not needed for this mode.
+WebRTC ports are not needed for this mode. In this workflow, `check` should
+show the TigerVNC target and report that WebRTC is not listening.
 
-**Laptop: Install the Isaac Sim WebRTC Streaming Client**
+The WebRTC-based workflows below use NVIDIA's WebRTC client instead of
+TigerVNC.
 
-Download the client from NVIDIA’s official
+### WebRTC Client on Your Laptop
+
+You need the NVIDIA Isaac Sim WebRTC Streaming Client for the SimplePod WebRTC
+workflow and for Isaac Lab commands that use `--livestream public`.
+
+Download the client from NVIDIA's official
 [Isaac Sim 5.1.0 Latest Release page](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/download.html)
-under **Isaac Sim WebRTC Streaming Client**. NVIDIA’s livestream client guide
+under **Isaac Sim WebRTC Streaming Client**. NVIDIA's livestream client guide
 is here:
 [Livestream Clients](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/manual_livestream_clients.html).
 
@@ -155,7 +181,7 @@ Then launch it again:
 
 When the client opens, enter the server IP and click **Connect**.
 
-**SimplePod: Isaac Sim with WebRTC**
+### SimplePod with WebRTC
 
 ```bash
 source .env
@@ -166,20 +192,7 @@ source .env
 Open the Isaac Sim WebRTC client and connect to the public IP printed by
 `./isaac_vmctl.sh check`.
 
-**SimplePod: Isaac Sim inside TigerVNC**
-
-```bash
-cd ~/isaac-projects
-source configs/isaac-sim-5.1.0.env
-source configs/simplepod-tigervnc.env
-./isaac_vmctl.sh start isaacsim --gui
-./isaac_vmctl.sh check
-```
-
-Open TigerVNC Viewer and connect to the VNC target printed by `check`. Isaac
-Sim should open inside the XFCE desktop at `1920x1080`.
-
-**Vast.ai: Headless Training or Simulation**
+### Vast.ai Headless Training or Simulation
 
 ```bash
 source .env
@@ -198,7 +211,7 @@ your terminal:
 ./isaac_vmctl.sh run -- bash -lc 'cd projects/my-project && python train.py'
 ```
 
-**SimplePod: Isaac Lab with Remote UI**
+### SimplePod Isaac Lab with Remote UI
 
 ```bash
 source configs/isaac-sim-5.1.0.env
