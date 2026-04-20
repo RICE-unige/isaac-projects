@@ -27,12 +27,15 @@ TIGERVNC_PORT="${TIGERVNC_PORT:-5901}"
 TIGERVNC_GEOMETRY="${TIGERVNC_GEOMETRY:-1920x1080}"
 TIGERVNC_DEPTH="${TIGERVNC_DEPTH:-24}"
 TIGERVNC_LOCALHOST="${TIGERVNC_LOCALHOST:-0}"
+TIGERVNC_DESKTOP="${TIGERVNC_DESKTOP:-xfce}"
+TIGERVNC_TERMINAL="${TIGERVNC_TERMINAL:-gnome-terminal}"
 TIGERVNC_PASSWORD="${TIGERVNC_PASSWORD:-}"
 VERBOSE=0
 LOG_FILE="${LOG_FILE:-}"
 ACTIVE_LOG_FILE=""
 INVOCATION_STRING="$SCRIPT_NAME"
 DOCKER_GROUP_RELOGIN_REQUIRED=0
+TIGERVNC_XSTARTUP_UPDATED=0
 
 COLOR_RESET=""
 COLOR_BOLD=""
@@ -465,7 +468,7 @@ Usage:
   ${SCRIPT_NAME} bootstrap zenoh|bridge [--force]
                                  Download or refresh the Zenoh bridge binary under zenoh/.
   ${SCRIPT_NAME} start isaacsim      Start Isaac Sim with WebRTC.
-  ${SCRIPT_NAME} start tigervnc|vnc  Install/start the TigerVNC GNOME desktop.
+  ${SCRIPT_NAME} start tigervnc|vnc  Install/start the TigerVNC desktop.
   ${SCRIPT_NAME} start zenoh|bridge [port] [--domain <id>] [--namespace <ns>] [--config <file>]
                                  Start the server-side Zenoh ROS 2 bridge.
   ${SCRIPT_NAME} start isaacsim --headless
@@ -487,7 +490,7 @@ Usage:
   ${SCRIPT_NAME} install zenoh|bridge [--force]
                                  Download or refresh the Zenoh bridge binary under zenoh/.
   ${SCRIPT_NAME} install tigervnc|vnc [--verbose] [--log-file <path>]
-                                 Install/start the TigerVNC GNOME desktop.
+                                 Install/start the TigerVNC desktop.
   ${SCRIPT_NAME} check               Show listener checks and client-side test commands.
   ${SCRIPT_NAME} help                Show this help.
 
@@ -510,6 +513,8 @@ Optional environment variables:
   TIGERVNC_GEOMETRY=1920x1080
   TIGERVNC_DEPTH=24
   TIGERVNC_LOCALHOST=0|1               # 0 listens on all interfaces; 1 binds localhost only
+  TIGERVNC_DESKTOP=xfce|gnome-flashback
+  TIGERVNC_TERMINAL=gnome-terminal
   TIGERVNC_PASSWORD=<8-char-password>  # optional; generated once when unset
   PRIVACY_USERID=<email>
   ISAAC_EXTRA_ARGS='<extra Isaac Sim args>'
@@ -963,6 +968,19 @@ validate_tigervnc_config() {
 
   [[ "$TIGERVNC_GEOMETRY" =~ ^[0-9]+x[0-9]+$ ]] || error "TIGERVNC_GEOMETRY must look like 1920x1080."
   [[ "$TIGERVNC_DEPTH" =~ ^[0-9]+$ ]] || error "TIGERVNC_DEPTH must be a number."
+
+  case "$TIGERVNC_DESKTOP" in
+    xfce|gnome-flashback) ;;
+    *) error "TIGERVNC_DESKTOP must be 'xfce' or 'gnome-flashback'." ;;
+  esac
+}
+
+tigervnc_desktop_label() {
+  case "$TIGERVNC_DESKTOP" in
+    xfce) printf 'XFCE desktop with GNOME Terminal and Ubuntu Yaru theme' ;;
+    gnome-flashback) printf 'GNOME Flashback with Ubuntu Yaru theme' ;;
+    *) printf '%s' "$TIGERVNC_DESKTOP" ;;
+  esac
 }
 
 ensure_tigervnc_desktop_installed() {
@@ -970,13 +988,19 @@ ensure_tigervnc_desktop_installed() {
   packages=(
     tigervnc-standalone-server
     tigervnc-common
+    xfce4
+    xfce4-goodies
+    xfce4-terminal
     gnome-session-flashback
     metacity
     dbus-x11
+    xauth
     x11-xserver-utils
     xterm
     gnome-terminal
     nautilus
+    thunar
+    adwaita-icon-theme
     yaru-theme-gtk
     yaru-theme-icon
   )
@@ -990,11 +1014,11 @@ ensure_tigervnc_desktop_installed() {
   done
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    info "TigerVNC and GNOME desktop packages are already installed."
+    info "TigerVNC desktop packages are already installed."
     return 0
   fi
 
-  info "Installing TigerVNC and GNOME desktop packages..."
+  info "Installing TigerVNC desktop packages..."
   ensure_common_apt_bits
   as_root add-apt-repository -y universe
   as_root apt-get update -y
@@ -1002,6 +1026,8 @@ ensure_tigervnc_desktop_installed() {
 }
 
 ensure_tigervnc_user_files() {
+  TIGERVNC_XSTARTUP_UPDATED=0
+
   local vnc_dir="${USER_HOME}/.vnc"
   local xstartup_path="${vnc_dir}/xstartup"
   local passwd_path="${vnc_dir}/passwd"
@@ -1021,25 +1047,93 @@ ensure_tigervnc_user_files() {
 #!/usr/bin/env bash
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+
+TIGERVNC_DESKTOP="${TIGERVNC_DESKTOP:-xfce}"
+TIGERVNC_TERMINAL="${TIGERVNC_TERMINAL:-gnome-terminal}"
+TIGERVNC_GTK_THEME="${TIGERVNC_GTK_THEME:-Yaru}"
+TIGERVNC_ICON_THEME="${TIGERVNC_ICON_THEME:-Yaru}"
+
+export TIGERVNC_DESKTOP TIGERVNC_TERMINAL TIGERVNC_GTK_THEME TIGERVNC_ICON_THEME
 export XDG_SESSION_TYPE=x11
-export XDG_CURRENT_DESKTOP=GNOME-Flashback:GNOME
-export XDG_SESSION_DESKTOP=gnome-flashback-metacity
-export DESKTOP_SESSION=gnome-flashback-metacity
-export GTK_THEME=Yaru
+export GTK_THEME="$TIGERVNC_GTK_THEME"
 
 if [[ -r "$HOME/.profile" ]]; then
   # shellcheck source=/dev/null
   source "$HOME/.profile"
 fi
 
-if command -v gnome-session >/dev/null 2>&1; then
-  exec dbus-run-session -- gnome-session --session=gnome-flashback-metacity
-fi
+case "$TIGERVNC_DESKTOP" in
+  xfce)
+    export XDG_CURRENT_DESKTOP=XFCE
+    export XDG_SESSION_DESKTOP=xfce
+    export DESKTOP_SESSION=xfce
+    if command -v startxfce4 >/dev/null 2>&1; then
+      exec dbus-run-session -- bash -lc '
+        xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "${TIGERVNC_GTK_THEME:-Yaru}" >/dev/null 2>&1 || true
+        xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s "${TIGERVNC_ICON_THEME:-Yaru}" >/dev/null 2>&1 || true
+        xfconf-query -c xsettings -p /Gtk/MonospaceFontName -n -t string -s "Ubuntu Mono 12" >/dev/null 2>&1 || true
+        xfconf-query -c xfce4-session -p /general/SaveOnExit -n -t bool -s false >/dev/null 2>&1 || true
+        if command -v "${TIGERVNC_TERMINAL:-gnome-terminal}" >/dev/null 2>&1; then
+          mkdir -p "$HOME/.local/share/applications"
+          xdg-mime default org.gnome.Terminal.desktop x-scheme-handler/terminal >/dev/null 2>&1 || true
+        fi
+        exec startxfce4
+      '
+    fi
+    ;;
+  gnome-flashback)
+    export XDG_CURRENT_DESKTOP=GNOME-Flashback:GNOME
+    export XDG_SESSION_DESKTOP=gnome-flashback-metacity
+    export DESKTOP_SESSION=gnome-flashback-metacity
+    if command -v gnome-session >/dev/null 2>&1; then
+      exec dbus-run-session -- gnome-session --session=gnome-flashback-metacity
+    fi
+    ;;
+esac
 
+if command -v "$TIGERVNC_TERMINAL" >/dev/null 2>&1; then
+  exec "$TIGERVNC_TERMINAL"
+fi
 exec xterm
 EOF_XSTARTUP
+  if [[ ! -f "$xstartup_path" ]] || ! cmp -s "$tmp_xstartup" "$xstartup_path"; then
+    TIGERVNC_XSTARTUP_UPDATED=1
+  fi
   install_for_current_user 0755 "$tmp_xstartup" "$xstartup_path"
   rm -f "$tmp_xstartup"
+
+  local xfce_config_dir="${USER_HOME}/.config/xfce4"
+  local helpers_path="${xfce_config_dir}/helpers.rc"
+  local desktop_dir="${USER_HOME}/Desktop"
+  local terminal_desktop_path="${desktop_dir}/GNOME Terminal.desktop"
+  mkdir -p "$xfce_config_dir" "$desktop_dir"
+  if [[ ${EUID} -eq 0 ]]; then
+    chown "$USER_NAME:$user_group" "${USER_HOME}/.config" "$xfce_config_dir" "$desktop_dir"
+  fi
+
+  local tmp_helpers
+  tmp_helpers=$(mktemp)
+  cat >"$tmp_helpers" <<'EOF_HELPERS'
+TerminalEmulator=gnome-terminal
+EOF_HELPERS
+  install_for_current_user 0644 "$tmp_helpers" "$helpers_path"
+  rm -f "$tmp_helpers"
+
+  local tmp_terminal_desktop
+  tmp_terminal_desktop=$(mktemp)
+  cat >"$tmp_terminal_desktop" <<'EOF_TERMINAL_DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GNOME Terminal
+Comment=Open a command line
+Exec=gnome-terminal
+Icon=org.gnome.Terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+EOF_TERMINAL_DESKTOP
+  install_for_current_user 0755 "$tmp_terminal_desktop" "$terminal_desktop_path"
+  rm -f "$tmp_terminal_desktop"
 
   local password generated_password tmp_pass tmp_plain
   generated_password=0
@@ -1115,17 +1209,20 @@ start_tigervnc_server() {
     localhost_value="yes"
   fi
 
-  if tigervnc_display_running && tigervnc_port_listening; then
+  if tigervnc_display_running && tigervnc_port_listening && [[ "$TIGERVNC_XSTARTUP_UPDATED" -eq 0 ]]; then
     info "TigerVNC already listening on ${TIGERVNC_PORT}/tcp."
     return 0
   fi
-  if tigervnc_port_listening; then
+  if tigervnc_port_listening && ! tigervnc_display_running; then
     error "TCP ${TIGERVNC_PORT} is already in use. Choose a different TIGERVNC_PORT."
   fi
 
+  if tigervnc_display_running && [[ "$TIGERVNC_XSTARTUP_UPDATED" -eq 1 ]]; then
+    info "TigerVNC startup file changed; restarting display ${display}."
+  fi
   as_current_user vncserver -kill "$display" >/dev/null 2>&1 || true
 
-  info "Starting TigerVNC GNOME desktop on ${display} (${TIGERVNC_PORT}/tcp)..."
+  info "Starting TigerVNC desktop on ${display} (${TIGERVNC_PORT}/tcp, ${TIGERVNC_GEOMETRY})..."
   as_current_user vncserver "$display" \
     -geometry "$TIGERVNC_GEOMETRY" \
     -depth "$TIGERVNC_DEPTH" \
@@ -1157,7 +1254,7 @@ print_tigervnc_connection_summary() {
   echo "  Target:       ${public_ip:-<server-ip>}:${TIGERVNC_PORT}"
   echo "  Display:      :${TIGERVNC_DISPLAY}"
   echo "  Geometry:     ${TIGERVNC_GEOMETRY}"
-  echo "  Desktop:      GNOME Flashback with Ubuntu Yaru theme"
+  echo "  Desktop:      $(tigervnc_desktop_label)"
   if [[ -f "$password_hint" && -z "$TIGERVNC_PASSWORD" ]]; then
     echo "  Password:     ${password_hint}"
   else
@@ -1629,7 +1726,7 @@ install_ros2_stack() {
 install_tigervnc_stack() {
   begin_install_session "install-tigervnc"
   run_install_step 2 1 "Validate host and workspace settings" prepare_host_context
-  run_install_step 2 2 "Install and start TigerVNC GNOME desktop" ensure_tigervnc_ready
+  run_install_step 2 2 "Install and start TigerVNC desktop" ensure_tigervnc_ready
   print_install_success_summary "TigerVNC desktop setup"
   print_tigervnc_connection_summary
 }
@@ -1647,7 +1744,7 @@ install_all() {
   run_install_step "$total_steps" 4 "Prepare Isaac Sim cache and data directories" ensure_isaac_dirs
   run_install_step "$total_steps" 5 "Pull or verify the Isaac Sim container image" ensure_isaac_image
   if is_truthy "$TIGERVNC_ENABLE"; then
-    run_install_step "$total_steps" 6 "Install and start TigerVNC GNOME desktop" ensure_tigervnc_ready
+    run_install_step "$total_steps" 6 "Install and start TigerVNC desktop" ensure_tigervnc_ready
   fi
   print_install_success_summary "Bootstrap"
   if is_truthy "$TIGERVNC_ENABLE"; then

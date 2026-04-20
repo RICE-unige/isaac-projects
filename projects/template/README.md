@@ -208,6 +208,8 @@ Restore on a fresh server:
 | `WEBRTC_STREAM_PORT` | `47998` |
 | `TIGERVNC_ENABLE` | `0` |
 | `TIGERVNC_PORT` | `5901` |
+| `TIGERVNC_GEOMETRY` | `1920x1080` |
+| `TIGERVNC_DESKTOP` | `xfce` |
 | `ISAAC_EXTRA_ARGS` | _(none)_ |
 
 ---

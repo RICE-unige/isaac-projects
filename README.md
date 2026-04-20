@@ -75,7 +75,7 @@ commands without reinstalling host packages. Use
 `./isaac_vmctl.sh bootstrap --verbose` when you want the full installer output
 streamed live; the default mode writes a detailed log file and prints its path.
 
-**SimplePod: Optional TigerVNC GNOME Desktop**
+**SimplePod: Optional TigerVNC Desktop**
 
 Use this when you want a full remote Linux desktop in addition to the Isaac Sim
 WebRTC viewport. SimplePod must allow inbound TCP `5901`, or the custom port
@@ -88,8 +88,10 @@ source configs/simplepod-tigervnc.env
 ./isaac_vmctl.sh check
 ```
 
-The bootstrap command installs TigerVNC, starts a GNOME Flashback desktop with
-the Ubuntu Yaru theme on display `:1`, and listens on TCP `5901`. If
+The bootstrap command installs TigerVNC, starts an XFCE desktop with GNOME
+Terminal, a Full HD `1920x1080` resolution, and the Ubuntu Yaru theme on
+display `:1`, then listens on TCP `5901`. XFCE is the default because it is
+more reliable than full GNOME inside a plain VNC session. If
 `TIGERVNC_PASSWORD` is empty, the helper generates one and saves it on the VM:
 
 ```bash
@@ -332,7 +334,7 @@ RICE thesis projects. Assets and preview GIFs are coming soon in
 | `./isaac_vmctl.sh run -- <command>` | Run a one-shot command inside the Isaac Sim image |
 | `./isaac_vmctl.sh run --livestream public -- <command>` | Run a one-shot command with AppLauncher WebRTC for remote Isaac Lab UI |
 | `./isaac_vmctl.sh stop isaacsim` | Stop the container |
-| `./isaac_vmctl.sh start tigervnc` | Install/start the TigerVNC GNOME desktop |
+| `./isaac_vmctl.sh start tigervnc` | Install/start the TigerVNC desktop |
 | `./isaac_vmctl.sh stop tigervnc` | Stop the TigerVNC desktop |
 | `./isaac_vmctl.sh restart isaacsim` | Restart the container |
 | `./isaac_vmctl.sh status` | Check host, GPU, Docker, ROS 2, container |
