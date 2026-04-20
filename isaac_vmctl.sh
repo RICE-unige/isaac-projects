@@ -468,8 +468,8 @@ Usage:
   ${SCRIPT_NAME} bootstrap zenoh|bridge [--force]
                                  Download or refresh the Zenoh bridge binary under zenoh/.
   ${SCRIPT_NAME} start isaacsim      Start Isaac Sim with WebRTC.
-  ${SCRIPT_NAME} start isaacsim --vnc
-                                 Start native Isaac Sim GUI inside the TigerVNC desktop.
+  ${SCRIPT_NAME} start isaacsim --gui|--vnc
+                                 Start native Isaac Sim GUI on the current X display.
   ${SCRIPT_NAME} start tigervnc|vnc  Install/start the TigerVNC desktop.
   ${SCRIPT_NAME} start zenoh|bridge [port] [--domain <id>] [--namespace <ns>] [--config <file>]
                                  Start the server-side Zenoh ROS 2 bridge.
@@ -533,7 +533,7 @@ Examples:
   ${SCRIPT_NAME} bootstrap zenoh
   ${SCRIPT_NAME} bootstrap bridge --force
   ${SCRIPT_NAME} start isaacsim
-  ${SCRIPT_NAME} start isaacsim --vnc
+  ${SCRIPT_NAME} start isaacsim --gui
   ${SCRIPT_NAME} start tigervnc
   ${SCRIPT_NAME} start zenoh
   ${SCRIPT_NAME} start bridge 7447 --domain 0
@@ -1200,6 +1200,10 @@ tigervnc_port_listening() {
   ss -lnt | awk '{print $4}' | grep -Eq "[:.]${TIGERVNC_PORT}$"
 }
 
+webrtc_port_listening() {
+  ss -lntu | grep -Eq ":(${WEBRTC_SIGNAL_PORT}|${WEBRTC_STREAM_PORT})\b"
+}
+
 tigervnc_port_owner_pids() {
   ss -lntp 2>/dev/null | awk -v port=":${TIGERVNC_PORT}" '
     $4 ~ port "$" && $0 ~ /Xtigervnc/ {
@@ -1353,10 +1357,14 @@ build_isaac_command() {
   local public_ip=${2:-}
   local tag
   tag="${ISAAC_IMAGE##*:}"
-  if [[ "$mode" == "vnc" ]]; then
+  if [[ "$mode" == "gui" ]]; then
     ISAAC_CMD=("./isaac-sim.sh")
   else
     ISAAC_CMD=("./runheadless.sh")
+  fi
+
+  if [[ "$mode" == "gui" ]]; then
+    ISAAC_CMD+=(--allow-root)
   fi
 
   if [[ "$mode" == "webrtc" ]]; then
@@ -1377,44 +1385,49 @@ build_isaac_command() {
   append_extra_args ISAAC_CMD
 }
 
-prepare_vnc_x11_access() {
-  validate_tigervnc_config
+prepare_gui_x11_access() {
+  GUI_DISPLAY="${DISPLAY:-}"
+  [[ -n "$GUI_DISPLAY" ]] || error "DISPLAY is not set. Run '${SCRIPT_NAME} start isaacsim --gui' from a terminal inside the GUI session, or export DISPLAY first."
 
-  VNC_DISPLAY=":${TIGERVNC_DISPLAY}"
-  VNC_XAUTH_FILE="${ISAAC_HOST_ROOT}/xauth/tigervnc-${TIGERVNC_DISPLAY}.xauth"
-  VNC_XAUTH_CONTAINER_FILE="/tmp/.isaac-vnc-${TIGERVNC_DISPLAY}.xauth"
+  local resolved_xauthority="${XAUTHORITY:-}"
+  if [[ -z "$resolved_xauthority" ]]; then
+    resolved_xauthority="${HOME}/.Xauthority"
+  fi
+  GUI_XAUTH_SOURCE="$resolved_xauthority"
+  GUI_XAUTH_FILE="${ISAAC_HOST_ROOT}/xauth/gui-$(current_user)-${GUI_DISPLAY//[:\/]/_}.xauth"
+  GUI_XAUTH_CONTAINER_FILE="/tmp/.isaac-gui-${GUI_DISPLAY//[:\/]/_}.xauth"
 
-  mkdir -p "$(dirname "$VNC_XAUTH_FILE")"
-  : >"$VNC_XAUTH_FILE"
-  as_root chown "${CONTAINER_UID}:${CONTAINER_GID}" "$VNC_XAUTH_FILE"
-  chmod 0600 "$VNC_XAUTH_FILE"
+  mkdir -p "$(dirname "$GUI_XAUTH_FILE")"
+  : >"$GUI_XAUTH_FILE"
+  as_root chown "${CONTAINER_UID}:${CONTAINER_GID}" "$GUI_XAUTH_FILE"
+  chmod 0600 "$GUI_XAUTH_FILE"
 
   local xauth_copied=0
-  if have_cmd xauth; then
+  if have_cmd xauth && [[ -f "$GUI_XAUTH_SOURCE" ]]; then
     local xauth_output
-    xauth_output=$(as_current_user env DISPLAY="$VNC_DISPLAY" XAUTHORITY="${USER_HOME}/.Xauthority" xauth nlist "$VNC_DISPLAY" 2>/dev/null || true)
+    xauth_output=$(env DISPLAY="$GUI_DISPLAY" XAUTHORITY="$GUI_XAUTH_SOURCE" xauth nlist "$GUI_DISPLAY" 2>/dev/null || true)
     if [[ -n "$xauth_output" ]]; then
-      printf '%s\n' "$xauth_output" | sed -e 's/^..../ffff/' | xauth -f "$VNC_XAUTH_FILE" nmerge - >/dev/null 2>&1 || true
-      if [[ -s "$VNC_XAUTH_FILE" ]]; then
+      printf '%s\n' "$xauth_output" | sed -e 's/^..../ffff/' | xauth -f "$GUI_XAUTH_FILE" nmerge - >/dev/null 2>&1 || true
+      if [[ -s "$GUI_XAUTH_FILE" ]]; then
         xauth_copied=1
       fi
     fi
   fi
 
   if [[ "$xauth_copied" -eq 1 ]]; then
-    info "Prepared Xauthority for TigerVNC display ${VNC_DISPLAY}."
+    info "Prepared Xauthority for GUI display ${GUI_DISPLAY}."
     return 0
   fi
 
-  warn "Could not copy Xauthority for ${VNC_DISPLAY}; allowing local X11 clients for this VNC session."
-  if as_current_user env DISPLAY="$VNC_DISPLAY" XAUTHORITY="${USER_HOME}/.Xauthority" xhost +local: >/dev/null 2>&1; then
+  warn "Could not copy Xauthority for ${GUI_DISPLAY}; allowing local X11 clients for this session."
+  if env DISPLAY="$GUI_DISPLAY" XAUTHORITY="$GUI_XAUTH_SOURCE" xhost +local: >/dev/null 2>&1; then
     return 0
   fi
-  if as_current_user env DISPLAY="$VNC_DISPLAY" xhost +local: >/dev/null 2>&1; then
+  if env DISPLAY="$GUI_DISPLAY" xhost +local: >/dev/null 2>&1; then
     return 0
   fi
 
-  error "Unable to prepare X11 access for TigerVNC display ${VNC_DISPLAY}. Check ${USER_HOME}/.vnc/*.log."
+  error "Unable to prepare X11 access for display ${GUI_DISPLAY}. Run this from the GUI desktop terminal and confirm X11 clients can open."
 }
 
 build_common_docker_args() {
@@ -1444,15 +1457,15 @@ build_common_docker_args() {
   fi
 }
 
-append_vnc_docker_args() {
+append_gui_docker_args() {
   DOCKER_RUN_ARGS+=(
-    -e "DISPLAY=${VNC_DISPLAY}"
-    -e "XAUTHORITY=${VNC_XAUTH_CONTAINER_FILE}"
+    -e "DISPLAY=${GUI_DISPLAY}"
+    -e "XAUTHORITY=${GUI_XAUTH_CONTAINER_FILE}"
     -e "QT_X11_NO_MITSHM=1"
     -e "__GLX_VENDOR_LIBRARY_NAME=nvidia"
     -e "NVIDIA_DRIVER_CAPABILITIES=all"
     -v "/tmp/.X11-unix:/tmp/.X11-unix:rw"
-    -v "${VNC_XAUTH_FILE}:${VNC_XAUTH_CONTAINER_FILE}:ro"
+    -v "${GUI_XAUTH_FILE}:${GUI_XAUTH_CONTAINER_FILE}:ro"
   )
 }
 
@@ -1469,8 +1482,8 @@ start_isaacsim() {
     case "$1" in
       --headless) mode="headless"; shift ;;
       --webrtc)   mode="webrtc"; shift ;;
-      --vnc|--desktop|--gui) mode="vnc"; shift ;;
-      *) error "Unknown start option: $1. Use --webrtc, --vnc, or --headless." ;;
+      --vnc|--desktop|--gui) mode="gui"; shift ;;
+      *) error "Unknown start option: $1. Use --webrtc, --gui, or --headless." ;;
     esac
   done
 
@@ -1481,9 +1494,8 @@ start_isaacsim() {
   ensure_isaac_image
   if [[ "$mode" == "webrtc" ]]; then
     configure_ufw_if_active
-  elif [[ "$mode" == "vnc" ]]; then
-    ensure_tigervnc_ready
-    prepare_vnc_x11_access
+  elif [[ "$mode" == "gui" ]]; then
+    prepare_gui_x11_access
   fi
 
   local public_ip signal_ready ros_status
@@ -1499,8 +1511,11 @@ start_isaacsim() {
 
   build_isaac_command "$mode" "$public_ip"
   build_common_docker_args
-  if [[ "$mode" == "vnc" ]]; then
-    append_vnc_docker_args
+  local docker_launch_args=(bash -lc 'cd /isaac-sim && exec "$@"' _)
+  if [[ "$mode" == "gui" ]]; then
+    append_gui_docker_args
+    DOCKER_RUN_ARGS+=(--entrypoint bash)
+    docker_launch_args=(-lc 'cd /isaac-sim && exec "$@"' _)
   fi
   remove_existing_container
 
@@ -1509,7 +1524,7 @@ start_isaacsim() {
     --name "$CONTAINER_NAME" \
     "${DOCKER_RUN_ARGS[@]}" \
     "$ISAAC_IMAGE" \
-    bash -lc 'cd /isaac-sim && exec "$@"' _ "${ISAAC_CMD[@]}"
+    "${docker_launch_args[@]}" "${ISAAC_CMD[@]}"
 
   if [[ "$mode" == "headless" ]]; then
     cat <<EOF_SUMMARY
@@ -1530,17 +1545,15 @@ EOF_SUMMARY
     return 0
   fi
 
-  if [[ "$mode" == "vnc" ]]; then
+  if [[ "$mode" == "gui" ]]; then
     cat <<EOF_SUMMARY
 
-Isaac Sim VNC GUI start requested.
+Isaac Sim GUI start requested.
 
 Container:      ${CONTAINER_NAME}
 Image:          ${ISAAC_IMAGE}
 Workspace:      ${HOST_WORKSPACE_ROOT} -> ${CONTAINER_WORKSPACE}
-VNC display:    ${VNC_DISPLAY}
-VNC target:     $(get_public_ip 2>/dev/null || printf '<server-ip>'):${TIGERVNC_PORT}
-VNC geometry:   ${TIGERVNC_GEOMETRY}
+X display:      ${GUI_DISPLAY}
 ROS 2 host:     ${ros_status}
 ROS_DOMAIN_ID:  ${ROS_DOMAIN_ID}
 
@@ -1550,7 +1563,7 @@ Useful commands:
   ${SCRIPT_NAME} shell
   ${SCRIPT_NAME} check
 
-Open TigerVNC Viewer and connect to the VNC target above. Isaac Sim should open inside that desktop.
+Isaac Sim should open on the current X display. When using TigerVNC, run this from the terminal inside that desktop.
 EOF_SUMMARY
     return 0
   fi
@@ -1708,14 +1721,19 @@ check_connectivity() {
   echo
 
   echo "=== Run these on your PC ==="
-  echo "TCP signaling test:"
-  echo "  nc -vz ${public_ip} ${WEBRTC_SIGNAL_PORT}"
-  echo
-  echo "UDP media test (nmap is better for UDP):"
-  echo "  nmap -sU -Pn -p ${WEBRTC_STREAM_PORT} ${public_ip}"
-  echo
-  echo "Isaac Sim WebRTC client target:"
-  echo "  ${public_ip}"
+  if webrtc_port_listening; then
+    echo "TCP signaling test:"
+    echo "  nc -vz ${public_ip} ${WEBRTC_SIGNAL_PORT}"
+    echo
+    echo "UDP media test (nmap is better for UDP):"
+    echo "  nmap -sU -Pn -p ${WEBRTC_STREAM_PORT} ${public_ip}"
+    echo
+    echo "Isaac Sim WebRTC client target:"
+    echo "  ${public_ip}"
+  else
+    echo "WebRTC is not listening on ${WEBRTC_SIGNAL_PORT}/${WEBRTC_STREAM_PORT}."
+    echo "  Start with '${SCRIPT_NAME} start isaacsim' when you want the streaming client."
+  fi
   if is_truthy "$TIGERVNC_ENABLE" || tigervnc_port_listening; then
     echo
     echo "TigerVNC TCP test:"
