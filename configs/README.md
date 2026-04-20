@@ -33,6 +33,9 @@ source configs/isaac-sim-5.1.0.env
 source configs/simplepod-tigervnc.env
 ./isaac_vmctl.sh bootstrap
 
+# Start native Isaac Sim UI inside the TigerVNC desktop
+./isaac_vmctl.sh start isaacsim --vnc
+
 # Run a one-shot training command inside the mounted repo
 ./isaac_vmctl.sh run -- bash -lc 'cd projects/my-project && python train.py'
 

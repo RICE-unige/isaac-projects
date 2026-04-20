@@ -11,7 +11,7 @@ This repository helps RICE lab thesis students start reproducible
 
 The main tool is [isaac_vmctl.sh](isaac_vmctl.sh). It bootstraps Docker,
 NVIDIA Container Toolkit, ROS 2, pulls the Isaac Sim container, mounts this
-repo into the container, and starts WebRTC or headless sessions.
+repo into the container, and starts WebRTC, TigerVNC GUI, or headless sessions.
 
 **What To Do First**
 
@@ -108,6 +108,19 @@ If `ufw` is active and `ALLOWED_CLIENT_IP` is set, bootstrap restricts the VNC
 port to that IP. This does not configure SimplePod provider-side port rules;
 open TCP `5901` in SimplePod before connecting.
 
+To run the native Isaac Sim UI inside that VNC desktop instead of using the
+WebRTC client, start Isaac Sim with the VNC mode:
+
+```bash
+source configs/isaac-sim-5.1.0.env
+source configs/simplepod-tigervnc.env
+./isaac_vmctl.sh start isaacsim --vnc
+```
+
+This starts the Isaac Sim container with access to the TigerVNC X display. Use
+the TigerVNC Viewer window as the Isaac Sim UI; WebRTC ports are not needed for
+this mode.
+
 **Laptop: Install the Isaac Sim WebRTC Streaming Client**
 
 Download the client from NVIDIA’s official
@@ -149,6 +162,18 @@ source .env
 
 Open the Isaac Sim WebRTC client and connect to the public IP printed by
 `./isaac_vmctl.sh check`.
+
+**SimplePod: Isaac Sim inside TigerVNC**
+
+```bash
+source configs/isaac-sim-5.1.0.env
+source configs/simplepod-tigervnc.env
+./isaac_vmctl.sh start isaacsim --vnc
+./isaac_vmctl.sh check
+```
+
+Open TigerVNC Viewer and connect to the VNC target printed by `check`. Isaac
+Sim should open inside the XFCE desktop at `1920x1080`.
 
 **Vast.ai: Headless Training or Simulation**
 
@@ -330,6 +355,7 @@ RICE thesis projects. Assets and preview GIFs are coming soon in
 | Command | Use |
 |---|---|
 | `./isaac_vmctl.sh start isaacsim` | Start Isaac Sim with WebRTC |
+| `./isaac_vmctl.sh start isaacsim --vnc` | Start native Isaac Sim UI inside TigerVNC |
 | `./isaac_vmctl.sh start isaacsim --headless` | Start Isaac Sim without WebRTC |
 | `./isaac_vmctl.sh run -- <command>` | Run a one-shot command inside the Isaac Sim image |
 | `./isaac_vmctl.sh run --livestream public -- <command>` | Run a one-shot command with AppLauncher WebRTC for remote Isaac Lab UI |
@@ -347,8 +373,11 @@ RICE thesis projects. Assets and preview GIFs are coming soon in
 
 ## WebRTC and ROS 2 Topics
 
-Use **WebRTC** when you need the Isaac Sim viewport. On SimplePod, make sure
-these inbound ports are available:
+Use **WebRTC** when you need the Isaac Sim viewport through NVIDIA's streaming
+client. Use **TigerVNC** with `./isaac_vmctl.sh start isaacsim --vnc` when you
+want the native Isaac Sim UI inside the remote Linux desktop and do not want to
+manage WebRTC separately. On SimplePod, make sure the matching inbound ports
+are available:
 
 | Port | Purpose |
 |---|---|

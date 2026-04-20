@@ -47,6 +47,13 @@ source projects/<your-project-name>/.env
 ./isaac_vmctl.sh start isaacsim
 ```
 
+On SimplePod, if you sourced `configs/simplepod-tigervnc.env` and want the
+native Isaac Sim UI inside the VNC desktop instead of WebRTC, use:
+
+```bash
+./isaac_vmctl.sh start isaacsim --vnc
+```
+
 If you are running an Isaac Lab script on SimplePod and want the remote UI,
 launch the Isaac Lab script itself with WebRTC instead of starting a separate
 `isaacsim` container:
