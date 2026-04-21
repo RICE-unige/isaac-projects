@@ -21,6 +21,15 @@ HOST_WORKSPACE_ROOT="${HOST_WORKSPACE_ROOT:-$SCRIPT_DIR}"
 CONTAINER_WORKSPACE="${CONTAINER_WORKSPACE:-/workspace/isaac-projects}"
 CONTAINER_UID="${CONTAINER_UID:-}"
 CONTAINER_GID="${CONTAINER_GID:-}"
+ISAACLAB_ENABLE="${ISAACLAB_ENABLE:-0}"
+ISAACLAB_PATH="${ISAACLAB_PATH:-external/IsaacLab}"
+ISAACLAB_REPO_URL="${ISAACLAB_REPO_URL:-https://github.com/isaac-sim/IsaacLab.git}"
+ISAACLAB_REF="${ISAACLAB_REF:-v2.3.2}"
+ISAACLAB_FRAMEWORKS="${ISAACLAB_FRAMEWORKS:-rsl_rl}"
+ISAACLAB_IMAGE="${ISAACLAB_IMAGE:-}"
+VSCODE_REMOTE_ENABLE="${VSCODE_REMOTE_ENABLE:-1}"
+JUPYTER_ENABLE="${JUPYTER_ENABLE:-1}"
+STUDENT_EXTRA_TOOLS="${STUDENT_EXTRA_TOOLS:-}"
 TIGERVNC_ENABLE="${TIGERVNC_ENABLE:-0}"
 TIGERVNC_DISPLAY="${TIGERVNC_DISPLAY:-1}"
 TIGERVNC_PORT="${TIGERVNC_PORT:-5901}"
@@ -463,7 +472,7 @@ usage() {
   cat <<USAGE
 Usage:
   ${SCRIPT_NAME} bootstrap [--verbose] [--log-file <path>]
-                                 Install/repair Docker, NVIDIA runtime, ROS 2, and pull the Isaac Sim image.
+                                 Install/repair Docker, NVIDIA runtime, ROS 2, default student tools, and pull the Isaac Sim image.
                                  Also installs and starts TigerVNC when TIGERVNC_ENABLE=1.
   ${SCRIPT_NAME} bootstrap zenoh|bridge [--force]
                                  Download or refresh the Zenoh bridge binary under zenoh/.
@@ -475,6 +484,8 @@ Usage:
                                  Start the server-side Zenoh ROS 2 bridge.
   ${SCRIPT_NAME} start isaacsim --headless
                                  Start Isaac Sim without WebRTC flags.
+  ${SCRIPT_NAME} run isaaclab [--path <workspace-subdir>] '<isaaclab.sh args>'
+                                 Run Isaac Lab from the bootstrap-managed checkout/image. Omit --headless only from a GUI/VNC terminal.
   ${SCRIPT_NAME} run [--livestream public|private] [--enable-cameras] [--public-ip <ip>] -- <command>
                                  Run a one-shot command inside the Isaac Sim container image.
   ${SCRIPT_NAME} stop isaacsim       Stop the Isaac Sim container.
@@ -484,7 +495,7 @@ Usage:
   ${SCRIPT_NAME} logs                Show Isaac Sim container logs.
   ${SCRIPT_NAME} shell               Open a shell in the running Isaac Sim container.
   ${SCRIPT_NAME} install all [--verbose] [--log-file <path>]
-                                 Install/repair Docker, NVIDIA container runtime, ROS 2, and Isaac Sim image.
+                                 Install/repair Docker, NVIDIA runtime, ROS 2, default student tools, and Isaac Sim image.
   ${SCRIPT_NAME} install ros2 [--verbose] [--log-file <path>]
                                  Install/repair ROS 2 only.
   ${SCRIPT_NAME} install docker [--verbose] [--log-file <path>]
@@ -508,6 +519,15 @@ Optional environment variables:
   CONTAINER_WORKSPACE=/workspace/isaac-projects
   CONTAINER_UID=<host-uid>            # optional; defaults to current user
   CONTAINER_GID=<host-gid>            # optional; defaults to current user
+  ISAACLAB_ENABLE=0|1                 # when 1, bootstrap clones/builds a pinned Isaac Lab setup
+  ISAACLAB_PATH=external/IsaacLab     # workspace-relative path that contains isaaclab.sh
+  ISAACLAB_REPO_URL=https://github.com/isaac-sim/IsaacLab.git
+  ISAACLAB_REF=v2.3.2
+  ISAACLAB_FRAMEWORKS=rsl_rl|rl_games|sb3|skrl|robomimic|all|none
+  ISAACLAB_IMAGE=<tag>                # optional local tag for the managed Isaac Lab image
+  VSCODE_REMOTE_ENABLE=0|1            # default 1; installs SSH host prerequisites and VS Code CLI
+  JUPYTER_ENABLE=0|1                  # default 1; installs JupyterLab + Notebook in a user-local venv
+  STUDENT_EXTRA_TOOLS='tool ...'      # optional: tmux htop btop ncdu nvtop nvitop ripgrep git-lfs ffmpeg mosh
   ALLOWED_CLIENT_IP=<your-public-ip>   # only applied if ufw is already active
   TIGERVNC_ENABLE=0|1                  # when 1, bootstrap installs/starts TigerVNC
   TIGERVNC_DISPLAY=1
@@ -529,6 +549,7 @@ Optional flags:
 Examples:
   ${SCRIPT_NAME} bootstrap
   TIGERVNC_ENABLE=1 ${SCRIPT_NAME} bootstrap
+  STUDENT_EXTRA_TOOLS="tmux ncdu nvtop" ${SCRIPT_NAME} bootstrap
   ${SCRIPT_NAME} bootstrap --verbose
   ${SCRIPT_NAME} bootstrap zenoh
   ${SCRIPT_NAME} bootstrap bridge --force
@@ -538,9 +559,10 @@ Examples:
   ${SCRIPT_NAME} start zenoh
   ${SCRIPT_NAME} start bridge 7447 --domain 0
   ${SCRIPT_NAME} start isaacsim --headless
+  ISAACLAB_ENABLE=1 ${SCRIPT_NAME} bootstrap
+  ${SCRIPT_NAME} run isaaclab '-p scripts/reinforcement_learning/rsl_rl/train.py --task=Isaac-Ant-v0 --headless'
+  ${SCRIPT_NAME} run isaaclab '-p scripts/reinforcement_learning/rsl_rl/train.py --task=Isaac-Velocity-Rough-Anymal-C-v0'
   ${SCRIPT_NAME} run -- bash -lc 'cd projects/my-project && python train.py'
-  ${SCRIPT_NAME} run --livestream public -- bash -lc 'cd external/IsaacLab && ./isaaclab.sh -p scripts/tutorials/00_sim/launch_app.py'
-  ${SCRIPT_NAME} run --livestream public --enable-cameras -- bash -lc 'cd external/IsaacLab && ./isaaclab.sh -p scripts/demos/quadrupeds.py'
   ROS_INSTALL_VARIANT=desktop ${SCRIPT_NAME} install ros2
   ${SCRIPT_NAME} install docker --log-file /tmp/isaac-bootstrap.log
   ALLOWED_CLIENT_IP=203.0.113.5 ${SCRIPT_NAME} start isaacsim
@@ -596,6 +618,16 @@ install_for_current_user() {
   else
     install -m "$mode" "$src" "$dst"
   fi
+}
+
+append_unique() {
+  local -n target_array=$1
+  local value="$2"
+  local existing
+  for existing in "${target_array[@]:-}"; do
+    [[ "$existing" == "$value" ]] && return 0
+  done
+  target_array+=("$value")
 }
 
 require_supported_host() {
@@ -883,6 +915,235 @@ ensure_ros_setup_in_bashrc() {
   fi
   rm -f "$tmp_file"
   info "Ensured ROS 2 setup is sourced from ${bashrc_path}."
+}
+
+ensure_shell_block() {
+  local shell_file="$1"
+  local marker_name="$2"
+  local block_body="$3"
+  local marker_begin="# >>> isaac-projects ${marker_name} >>>"
+  local marker_end="# <<< isaac-projects ${marker_name} <<<"
+  local tmp_file user_group
+
+  mkdir -p "$(dirname "$shell_file")"
+  touch "$shell_file"
+
+  tmp_file=$(mktemp)
+  if grep -Fqx "$marker_begin" "$shell_file"; then
+    awk -v begin="$marker_begin" -v end="$marker_end" '
+      $0 == begin { skip=1; next }
+      $0 == end { skip=0; next }
+      !skip { print }
+    ' "$shell_file" >"$tmp_file"
+  else
+    cp "$shell_file" "$tmp_file"
+  fi
+
+  {
+    printf '\n%s\n' "$marker_begin"
+    printf '%s\n' "$block_body"
+    printf '%s\n' "$marker_end"
+  } >>"$tmp_file"
+
+  if [[ ${EUID} -eq 0 ]]; then
+    user_group=$(id -gn "$USER_NAME")
+    install -o "$USER_NAME" -g "$user_group" -m 0644 "$tmp_file" "$shell_file"
+  else
+    install -m 0644 "$tmp_file" "$shell_file"
+  fi
+  rm -f "$tmp_file"
+}
+
+ensure_user_local_bin_dir() {
+  local bin_dir="${USER_HOME}/.local/bin"
+  local user_group
+  user_group=$(id -gn "$USER_NAME")
+
+  if [[ ${EUID} -eq 0 ]]; then
+    install -d -o "$USER_NAME" -g "$user_group" -m 0755 "$bin_dir"
+  else
+    install -d -m 0755 "$bin_dir"
+  fi
+}
+
+ensure_user_local_bin_in_shell_startup() {
+  local path_block='if [ -d "$HOME/.local/bin" ]; then
+  case ":$PATH:" in
+    *:"$HOME/.local/bin":*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+  esac
+fi'
+
+  ensure_shell_block "${USER_HOME}/.profile" "user-local-bin" "$path_block"
+  ensure_shell_block "${USER_HOME}/.bashrc" "user-local-bin" "$path_block"
+}
+
+install_user_command_wrapper() {
+  local wrapper_path="$1"
+  local target_path="$2"
+  local tmp_file
+
+  tmp_file=$(mktemp)
+  cat >"$tmp_file" <<EOF_WRAPPER
+#!/usr/bin/env bash
+exec "${target_path}" "\$@"
+EOF_WRAPPER
+  install_for_current_user 0755 "$tmp_file" "$wrapper_path"
+  rm -f "$tmp_file"
+}
+
+ensure_student_python_venv() {
+  local base_dir="${USER_HOME}/.local/share/isaac-projects/python-tools"
+  local user_group
+  user_group=$(id -gn "$USER_NAME")
+
+  STUDENT_PYTHON_VENV="${base_dir}/venv"
+  if [[ -x "${STUDENT_PYTHON_VENV}/bin/python" ]]; then
+    return 0
+  fi
+
+  if [[ ${EUID} -eq 0 ]]; then
+    install -d -o "$USER_NAME" -g "$user_group" -m 0755 "$base_dir"
+  else
+    install -d -m 0755 "$base_dir"
+  fi
+
+  info "Creating Python tools environment at ${STUDENT_PYTHON_VENV}..."
+  as_current_user python3 -m venv "$STUDENT_PYTHON_VENV"
+  as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m pip install --upgrade pip setuptools wheel
+}
+
+ensure_vscode_cli_installed() {
+  local install_path="${USER_HOME}/.local/bin/code"
+  local cli_arch url archive tmp_dir
+
+  if have_cmd code || [[ -x "$install_path" ]]; then
+    info "VS Code CLI already available: $(command -v code 2>/dev/null || printf '%s' "$install_path")"
+    return 0
+  fi
+
+  case "$ARCH" in
+    amd64) cli_arch="x64" ;;
+    arm64) cli_arch="arm64" ;;
+    armhf|armel) cli_arch="armhf" ;;
+    *)
+      warn "Skipping VS Code CLI install on unsupported architecture ${ARCH}. Remote-SSH can still install VS Code Server on first connection."
+      return 0
+      ;;
+  esac
+
+  url="https://update.code.visualstudio.com/latest/cli-linux-${cli_arch}/stable"
+  archive=$(mktemp --suffix=.tar.gz)
+  tmp_dir=$(mktemp -d)
+
+  info "Installing VS Code CLI from ${url}..."
+  curl -fsSL -o "$archive" "$url"
+  tar -xzf "$archive" -C "$tmp_dir"
+  [[ -x "${tmp_dir}/code" ]] || error "VS Code CLI archive did not contain the expected 'code' binary."
+  install_for_current_user 0755 "${tmp_dir}/code" "$install_path"
+  rm -f "$archive"
+  rm -rf "$tmp_dir"
+  info "Installed VS Code CLI to ${install_path}."
+}
+
+ensure_jupyter_installed() {
+  local jupyter_packages=(jupyterlab notebook ipykernel)
+
+  ensure_student_python_venv
+  if as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m pip show "${jupyter_packages[@]}" >/dev/null 2>&1; then
+    info "JupyterLab and Notebook already installed in ${STUDENT_PYTHON_VENV}."
+  else
+    info "Installing JupyterLab and Notebook into ${STUDENT_PYTHON_VENV}..."
+    as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m pip install --upgrade "${jupyter_packages[@]}"
+  fi
+
+  install_user_command_wrapper "${USER_HOME}/.local/bin/jupyter" "${STUDENT_PYTHON_VENV}/bin/jupyter"
+  install_user_command_wrapper "${USER_HOME}/.local/bin/jupyter-lab" "${STUDENT_PYTHON_VENV}/bin/jupyter-lab"
+  install_user_command_wrapper "${USER_HOME}/.local/bin/jupyter-notebook" "${STUDENT_PYTHON_VENV}/bin/jupyter-notebook"
+  as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m ipykernel install --user --name isaac-projects-tools --display-name "Python (isaac-projects)" >/dev/null 2>&1 || true
+}
+
+ensure_student_tooling() {
+  local apt_packages=()
+  local python_packages=()
+  local extra_tool normalized_tool raw_tools
+
+  ensure_user_local_bin_dir
+  ensure_user_local_bin_in_shell_startup
+
+  if is_truthy "$VSCODE_REMOTE_ENABLE"; then
+    append_unique apt_packages openssh-server
+    append_unique apt_packages git
+  fi
+  if is_truthy "$JUPYTER_ENABLE"; then
+    append_unique apt_packages python3
+    append_unique apt_packages python3-venv
+    append_unique apt_packages python3-pip
+  fi
+
+  raw_tools="${STUDENT_EXTRA_TOOLS//,/ }"
+  for extra_tool in $raw_tools; do
+    normalized_tool=$(printf '%s' "$extra_tool" | tr '[:upper:]' '[:lower:]')
+    case "$normalized_tool" in
+      tmux|htop|btop|ncdu|nvtop|ripgrep|ffmpeg|mosh)
+        append_unique apt_packages "$normalized_tool"
+        ;;
+      git-lfs)
+        append_unique apt_packages git-lfs
+        ;;
+      nvitop)
+        append_unique apt_packages python3
+        append_unique apt_packages python3-venv
+        append_unique apt_packages python3-pip
+        append_unique python_packages nvitop
+        ;;
+      "")
+        ;;
+      *)
+        error "Unsupported STUDENT_EXTRA_TOOLS entry: ${extra_tool}. Supported values: tmux htop btop ncdu nvtop nvitop ripgrep git-lfs ffmpeg mosh"
+        ;;
+    esac
+  done
+
+  if (( ${#apt_packages[@]} > 0 )); then
+    ensure_common_apt_bits
+    as_root apt-get install -y "${apt_packages[@]}"
+  fi
+
+  if is_truthy "$VSCODE_REMOTE_ENABLE"; then
+    if have_cmd systemctl; then
+      as_root systemctl enable --now ssh
+    else
+      warn "systemctl is not available; ensure the SSH service is running before using VS Code Remote-SSH."
+    fi
+    ensure_vscode_cli_installed
+  fi
+
+  if is_truthy "$JUPYTER_ENABLE"; then
+    ensure_jupyter_installed
+  fi
+
+  if (( ${#python_packages[@]} > 0 )); then
+    ensure_student_python_venv
+    if as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m pip show "${python_packages[@]}" >/dev/null 2>&1; then
+      info "Optional Python student tools already installed in ${STUDENT_PYTHON_VENV}."
+    else
+      info "Installing optional Python student tools into ${STUDENT_PYTHON_VENV}: ${python_packages[*]}"
+      as_current_user "${STUDENT_PYTHON_VENV}/bin/python" -m pip install --upgrade "${python_packages[@]}"
+    fi
+    local python_tool
+    for python_tool in "${python_packages[@]}"; do
+      case "$python_tool" in
+        nvitop)
+          install_user_command_wrapper "${USER_HOME}/.local/bin/nvitop" "${STUDENT_PYTHON_VENV}/bin/nvitop"
+          ;;
+      esac
+    done
+  fi
+
+  if [[ " ${apt_packages[*]} " == *" git-lfs "* ]]; then
+    as_current_user git lfs install --skip-repo >/dev/null 2>&1 || true
+  fi
 }
 
 ensure_isaac_dirs() {
@@ -1385,6 +1646,192 @@ build_isaac_command() {
   append_extra_args ISAAC_CMD
 }
 
+parse_shell_words() {
+  local raw_words="$1"
+  have_cmd python3 || error "python3 is required to parse Isaac Lab command strings. Run '${SCRIPT_NAME} bootstrap' first."
+  python3 -c 'import shlex, sys; [print(arg) for arg in shlex.split(sys.argv[1])]' "$raw_words"
+}
+
+sanitize_docker_component() {
+  local value
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  value=$(printf '%s' "$value" | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
+  printf '%s' "${value:-default}"
+}
+
+resolve_isaaclab_image() {
+  if [[ -n "$ISAACLAB_IMAGE" ]]; then
+    printf '%s' "$ISAACLAB_IMAGE"
+    return 0
+  fi
+
+  local base_tag ref_tag framework_tag
+  base_tag=$(sanitize_docker_component "${ISAAC_IMAGE##*:}")
+  ref_tag=$(sanitize_docker_component "$ISAACLAB_REF")
+  framework_tag=$(sanitize_docker_component "$ISAACLAB_FRAMEWORKS")
+  printf 'rice/isaac-lab:%s-%s-%s' "$base_tag" "$ref_tag" "$framework_tag"
+}
+
+isaaclab_args_request_install() {
+  case "${1:-}" in
+    --install|-i) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+isaaclab_args_need_gui() {
+  local joined_args=" $* "
+
+  case "$joined_args" in
+    *" --headless "*|*" --headless"|*"--headless "*) return 1 ;;
+  esac
+
+  case "$joined_args" in
+    *" -p "*|*" --python "*|*" -s "*|*" --sim "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_isaaclab_workspace() {
+  [[ -n "$ISAACLAB_PATH" ]] || error "ISAACLAB_PATH must not be empty."
+  [[ "$ISAACLAB_PATH" != /* ]] || error "ISAACLAB_PATH must be a path inside the mounted workspace, not an absolute path."
+  [[ -n "$ISAACLAB_REPO_URL" ]] || error "ISAACLAB_REPO_URL must not be empty."
+  [[ -n "$ISAACLAB_REF" ]] || error "ISAACLAB_REF must not be empty."
+  [[ -n "$ISAACLAB_FRAMEWORKS" ]] || error "ISAACLAB_FRAMEWORKS must not be empty."
+}
+
+ensure_git_installed() {
+  if have_cmd git; then
+    return 0
+  fi
+  ensure_common_apt_bits
+  as_root apt-get install -y git
+}
+
+ensure_isaaclab_runtime_link() {
+  local checkout_path="$1"
+  local link_path="${checkout_path}/_isaac_sim"
+  local link_target="/isaac-sim"
+
+  if [[ -L "$link_path" ]]; then
+    if [[ "$(readlink "$link_path")" == "$link_target" ]]; then
+      return 0
+    fi
+    rm -f "$link_path"
+  elif [[ -e "$link_path" ]]; then
+    warn "Isaac Lab checkout already has ${link_path}; leaving it in place."
+    return 0
+  fi
+
+  as_current_user ln -s "$link_target" "$link_path"
+  info "Prepared Isaac Lab runtime link: ${link_path} -> ${link_target}"
+}
+
+ensure_isaaclab_checkout() {
+  validate_isaaclab_workspace
+  ensure_git_installed
+
+  local checkout_path="${HOST_WORKSPACE_ROOT}/${ISAACLAB_PATH}"
+  local checkout_parent
+  checkout_parent=$(dirname "$checkout_path")
+  local user_group
+  user_group=$(id -gn "$USER_NAME")
+  if [[ ${EUID} -eq 0 ]]; then
+    install -d -o "$USER_NAME" -g "$user_group" -m 0755 "$checkout_parent"
+  else
+    install -d -m 0755 "$checkout_parent"
+  fi
+
+  if [[ -e "$checkout_path" && ! -d "$checkout_path" ]]; then
+    error "ISAACLAB_PATH points to a non-directory: ${checkout_path}"
+  fi
+
+  if [[ ! -d "${checkout_path}/.git" ]]; then
+    if [[ -d "$checkout_path" ]] && [[ -n "$(find "$checkout_path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+      error "Isaac Lab checkout path exists but is not a git checkout: ${checkout_path}"
+    fi
+    info "Cloning Isaac Lab ${ISAACLAB_REF} into ${checkout_path}..."
+    as_current_user git clone "$ISAACLAB_REPO_URL" "$checkout_path"
+  fi
+
+  [[ -d "${checkout_path}/.git" ]] || error "Isaac Lab checkout did not initialize correctly at ${checkout_path}"
+
+  local dirty_checkout=""
+  dirty_checkout=$(as_current_user git -C "$checkout_path" status --porcelain --untracked-files=no 2>/dev/null || true)
+  if [[ -n "$dirty_checkout" ]]; then
+    ensure_isaaclab_runtime_link "$checkout_path"
+    warn "Isaac Lab checkout has local changes at ${checkout_path}; leaving the checkout as-is and building from the current workspace contents."
+    return 0
+  fi
+
+  info "Syncing Isaac Lab checkout to ${ISAACLAB_REF}..."
+  as_current_user git -C "$checkout_path" remote set-url origin "$ISAACLAB_REPO_URL" >/dev/null 2>&1 || true
+  as_current_user git -C "$checkout_path" fetch --tags --force origin
+  as_current_user git -C "$checkout_path" checkout --force "$ISAACLAB_REF"
+
+  if as_current_user git -C "$checkout_path" rev-parse --verify "origin/${ISAACLAB_REF}" >/dev/null 2>&1; then
+    as_current_user git -C "$checkout_path" reset --hard "origin/${ISAACLAB_REF}" >/dev/null
+  fi
+
+  local current_rev
+  current_rev=$(as_current_user git -C "$checkout_path" rev-parse --short HEAD)
+  ensure_isaaclab_runtime_link "$checkout_path"
+  info "Isaac Lab checkout ready at ${checkout_path} (${current_rev})."
+}
+
+ensure_isaaclab_image() {
+  validate_isaaclab_workspace
+  ensure_isaac_image
+  ensure_isaaclab_checkout
+
+  local checkout_path="${HOST_WORKSPACE_ROOT}/${ISAACLAB_PATH}"
+  local helper_path="${checkout_path}/isaaclab.sh"
+  [[ -x "$helper_path" || -f "$helper_path" ]] || error "Isaac Lab helper not found at ${helper_path}"
+  local checkout_rev
+  checkout_rev=$(as_current_user git -C "$checkout_path" rev-parse HEAD 2>/dev/null || true)
+  [[ -n "$checkout_rev" ]] || error "Unable to determine the current Isaac Lab revision at ${checkout_path}"
+  local dirty_checkout=""
+  dirty_checkout=$(as_current_user git -C "$checkout_path" status --porcelain --untracked-files=no 2>/dev/null || true)
+  local dockerfile_path="${HOST_WORKSPACE_ROOT}/containers/isaac-lab.Dockerfile"
+  [[ -f "$dockerfile_path" ]] || error "Isaac Lab Dockerfile not found at ${dockerfile_path}"
+  local dockerfile_hash
+  dockerfile_hash=$(sha256sum "$dockerfile_path" | awk '{print $1}')
+  [[ -n "$dockerfile_hash" ]] || error "Unable to compute the Dockerfile hash for ${dockerfile_path}"
+
+  local isaaclab_image
+  isaaclab_image=$(resolve_isaaclab_image)
+
+  if docker_cmd image inspect "$isaaclab_image" >/dev/null 2>&1; then
+    local image_ref image_frameworks image_path image_base image_checkout_rev image_dockerfile_hash
+    image_ref=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.ref" }}' 2>/dev/null || true)
+    image_frameworks=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.frameworks" }}' 2>/dev/null || true)
+    image_path=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.path" }}' 2>/dev/null || true)
+    image_base=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.base_image" }}' 2>/dev/null || true)
+    image_checkout_rev=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.checkout_rev" }}' 2>/dev/null || true)
+    image_dockerfile_hash=$(docker_cmd image inspect "$isaaclab_image" --format '{{ index .Config.Labels "rice.isaaclab.dockerfile_hash" }}' 2>/dev/null || true)
+    if [[ -z "$dirty_checkout" && "$image_ref" == "$ISAACLAB_REF" && "$image_frameworks" == "$ISAACLAB_FRAMEWORKS" && "$image_path" == "$ISAACLAB_PATH" && "$image_base" == "$ISAAC_IMAGE" && "$image_checkout_rev" == "$checkout_rev" && "$image_dockerfile_hash" == "$dockerfile_hash" ]]; then
+      info "Isaac Lab image already present: ${isaaclab_image}"
+      return 0
+    fi
+    warn "Existing Isaac Lab image ${isaaclab_image} does not match the requested config; rebuilding."
+  fi
+
+  if [[ -n "$dirty_checkout" ]]; then
+    warn "Isaac Lab checkout has local modifications at ${checkout_path}; building the managed image from the current workspace contents."
+  fi
+  info "Building Isaac Lab image ${isaaclab_image} from ${checkout_path} (${ISAACLAB_REF}, ${ISAACLAB_FRAMEWORKS}, ${checkout_rev:0:12})..."
+  docker_cmd build \
+    -f "${HOST_WORKSPACE_ROOT}/containers/isaac-lab.Dockerfile" \
+    --build-arg "ISAAC_IMAGE=${ISAAC_IMAGE}" \
+    --build-arg "ISAACLAB_PATH=${ISAACLAB_PATH}" \
+    --build-arg "ISAACLAB_REF=${ISAACLAB_REF}" \
+    --build-arg "ISAACLAB_FRAMEWORKS=${ISAACLAB_FRAMEWORKS}" \
+    --build-arg "ISAACLAB_CHECKOUT_REV=${checkout_rev}" \
+    --build-arg "ISAACLAB_DOCKERFILE_HASH=${dockerfile_hash}" \
+    -t "$isaaclab_image" \
+    "$HOST_WORKSPACE_ROOT"
+}
+
 prepare_gui_x11_access() {
   GUI_DISPLAY="${DISPLAY:-}"
   [[ -n "$GUI_DISPLAY" ]] || error "DISPLAY is not set. Run '${SCRIPT_NAME} start isaacsim --gui' from a terminal inside the GUI session, or export DISPLAY first."
@@ -1474,6 +1921,53 @@ remove_existing_container() {
     info "Removing existing container named ${CONTAINER_NAME}..."
     docker_cmd rm -f "$CONTAINER_NAME" >/dev/null || true
   fi
+}
+
+make_ephemeral_container_name() {
+  local prefix="$1"
+  printf '%s-%s-%s' "$prefix" "$(date -u +%Y%m%d-%H%M%S)" "$$"
+}
+
+run_docker_attached() {
+  local name_prefix="$1"
+  shift
+
+  local run_container_name
+  run_container_name=$(make_ephemeral_container_name "$name_prefix")
+
+  local docker_pid=""
+  local run_exit=0
+  local interrupted=0
+
+  stop_run_container() {
+    if [[ "$interrupted" -eq 0 ]]; then
+      interrupted=1
+      warn "Interrupt received. Stopping container ${run_container_name}..."
+    fi
+    docker_cmd stop -t 10 "$run_container_name" >/dev/null 2>&1 || true
+  }
+
+  get_docker_cmd
+  trap 'stop_run_container' INT TERM
+  "${DOCKER[@]}" run --rm --name "$run_container_name" "$@" &
+  docker_pid=$!
+
+  if wait "$docker_pid"; then
+    run_exit=0
+  else
+    run_exit=$?
+  fi
+
+  trap - INT TERM
+
+  if [[ "$interrupted" -eq 1 ]]; then
+    if ! wait "$docker_pid" 2>/dev/null; then
+      :
+    fi
+    return 130
+  fi
+
+  return "$run_exit"
 }
 
 start_isaacsim() {
@@ -1826,10 +2320,91 @@ run_in_isaac_container() {
   if [[ "$enable_cameras" == "1" ]]; then
     info "ENABLE_CAMERAS=1 will be set inside the container."
   fi
-  docker_cmd run --rm \
+  local run_status=0
+  if run_docker_attached "isaac-run" \
     "${DOCKER_RUN_ARGS[@]}" \
     "$ISAAC_IMAGE" \
-    "$@"
+    "$@"; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  return "$run_status"
+}
+
+run_isaaclab() {
+  local custom_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path)
+        [[ $# -ge 2 ]] || error "Usage: ${SCRIPT_NAME} run isaaclab [--path <workspace-subdir>] '<isaaclab.sh args>'"
+        custom_path="$2"
+        shift 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [[ $# -gt 0 ]] || error "Usage: ${SCRIPT_NAME} run isaaclab [--path <workspace-subdir>] '<isaaclab.sh args>'"
+
+  local -a isaaclab_args=()
+  if [[ $# -eq 1 ]]; then
+    mapfile -t isaaclab_args < <(parse_shell_words "$1")
+  else
+    isaaclab_args=("$@")
+  fi
+  (( ${#isaaclab_args[@]} > 0 )) || error "Isaac Lab arguments resolved to an empty command."
+  if isaaclab_args_request_install "${isaaclab_args[@]}"; then
+    error "Isaac Lab installation is bootstrap-managed in this repo. Set ISAACLAB_REF / ISAACLAB_FRAMEWORKS in your env and rerun '${SCRIPT_NAME} bootstrap' instead of running 'isaaclab.sh --install' manually."
+  fi
+
+  require_supported_host
+  init_paths
+  verify_nvidia_container_runtime
+  ensure_isaac_dirs
+
+  local isaaclab_path="${custom_path:-$ISAACLAB_PATH}"
+  local saved_isaaclab_path="$ISAACLAB_PATH"
+  ISAACLAB_PATH="$isaaclab_path"
+  ensure_isaaclab_image
+
+  build_common_docker_args
+  DOCKER_RUN_ARGS+=(-e "TERM=xterm")
+  local mode="headless"
+  if isaaclab_args_need_gui "${isaaclab_args[@]}"; then
+    mode="gui"
+    prepare_gui_x11_access
+    append_gui_docker_args
+  fi
+  DOCKER_RUN_ARGS+=(--entrypoint bash)
+
+  local host_isaaclab_dir="${HOST_WORKSPACE_ROOT}/${ISAACLAB_PATH}"
+  local container_isaaclab_dir="${CONTAINER_WORKSPACE}/${ISAACLAB_PATH}"
+  local isaaclab_image
+  isaaclab_image=$(resolve_isaaclab_image)
+
+  info "Running Isaac Lab from ${host_isaaclab_dir} (${mode})..."
+  info "Isaac Lab image: ${isaaclab_image}"
+  info "Workspace: ${HOST_WORKSPACE_ROOT} -> ${CONTAINER_WORKSPACE}"
+  if [[ "$mode" == "gui" ]]; then
+    info "Isaac Lab GUI will open on ${GUI_DISPLAY}. Run this from the terminal inside TigerVNC when you want the viewport there."
+  else
+    info "Isaac Lab command will run without attaching to the current X display."
+  fi
+
+  local run_status=0
+  if run_docker_attached "isaaclab-run" \
+    "${DOCKER_RUN_ARGS[@]}" \
+    "$isaaclab_image" \
+    -lc 'cd "$1" && shift && exec ./isaaclab.sh "$@"' _ "$container_isaaclab_dir" "${isaaclab_args[@]}"; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  ISAACLAB_PATH="$saved_isaaclab_path"
+  return "$run_status"
 }
 
 prepare_host_context() {
@@ -1888,19 +2463,26 @@ install_tigervnc_stack() {
 }
 
 install_all() {
-  local total_steps=5
+  local total_steps=6
+  if is_truthy "$ISAACLAB_ENABLE"; then
+    total_steps=7
+  fi
   if is_truthy "$TIGERVNC_ENABLE"; then
-    total_steps=6
+    total_steps=$((total_steps + 1))
   fi
 
   begin_install_session "bootstrap"
   run_install_step "$total_steps" 1 "Validate host and workspace settings" prepare_host_context
   run_install_step "$total_steps" 2 "Install or verify Docker and NVIDIA Container Toolkit" ensure_nvidia_container_runtime
   run_install_step "$total_steps" 3 "Install or verify ROS 2" ensure_ros2_installed
-  run_install_step "$total_steps" 4 "Prepare Isaac Sim cache and data directories" ensure_isaac_dirs
-  run_install_step "$total_steps" 5 "Pull or verify the Isaac Sim container image" ensure_isaac_image
+  run_install_step "$total_steps" 4 "Install or verify default student tooling" ensure_student_tooling
+  run_install_step "$total_steps" 5 "Prepare Isaac Sim cache and data directories" ensure_isaac_dirs
+  run_install_step "$total_steps" 6 "Pull or verify the Isaac Sim container image" ensure_isaac_image
+  if is_truthy "$ISAACLAB_ENABLE"; then
+    run_install_step "$total_steps" 7 "Clone/update Isaac Lab and build the managed Isaac Lab image" ensure_isaaclab_image
+  fi
   if is_truthy "$TIGERVNC_ENABLE"; then
-    run_install_step "$total_steps" 6 "Install and start TigerVNC desktop" ensure_tigervnc_ready
+    run_install_step "$total_steps" "$total_steps" "Install and start TigerVNC desktop" ensure_tigervnc_ready
   fi
   print_install_success_summary "Bootstrap"
   if is_truthy "$TIGERVNC_ENABLE"; then
@@ -1963,7 +2545,15 @@ main() {
       ;;
     run)
       shift
-      run_in_isaac_container "$@"
+      case "${1:-}" in
+        isaaclab)
+          shift
+          run_isaaclab "$@"
+          ;;
+        *)
+          run_in_isaac_container "$@"
+          ;;
+      esac
       ;;
     bootstrap)
       case "$sub" in
@@ -2033,4 +2623,9 @@ main() {
   esac
 }
 
-main "$@"
+if main "$@"; then
+  exit 0
+else
+  main_status=$?
+  exit "$main_status"
+fi

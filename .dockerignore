@@ -1,0 +1,16 @@
+.git
+.env
+projects/*/.env
+projects/*/.snapshot.env
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/*.pyc
+projects/*/artifacts/
+projects/*/ros2_ws/build/
+projects/*/ros2_ws/install/
+projects/*/ros2_ws/log/
+external/IsaacLab/.git
+external/IsaacLab/.git/**
+external/IsaacLab/docs/_build/
+external/IsaacLab/logs/
