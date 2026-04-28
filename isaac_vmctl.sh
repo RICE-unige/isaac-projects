@@ -486,6 +486,8 @@ Usage:
                                  Start Isaac Sim without WebRTC flags.
   ${SCRIPT_NAME} run isaaclab [--path <workspace-subdir>] '<isaaclab.sh args>'
                                  Run Isaac Lab from the bootstrap-managed checkout/image. Omit --headless only from a GUI/VNC terminal.
+  ${SCRIPT_NAME} run --py [--gui|--livestream public|private [--public-ip <ip>]] '<python.sh args>'
+                                 Run an Isaac Sim python.sh command in a one-shot container. Add --gui from a GUI/VNC terminal to open the app on the current X display, or use --livestream for WebRTC.
   ${SCRIPT_NAME} run [--livestream public|private] [--enable-cameras] [--public-ip <ip>] -- <command>
                                  Run a one-shot command inside the Isaac Sim container image.
   ${SCRIPT_NAME} stop isaacsim       Stop the Isaac Sim container.
@@ -562,6 +564,8 @@ Examples:
   ISAACLAB_ENABLE=1 ${SCRIPT_NAME} bootstrap
   ${SCRIPT_NAME} run isaaclab '-p scripts/reinforcement_learning/rsl_rl/train.py --task=Isaac-Ant-v0 --headless'
   ${SCRIPT_NAME} run isaaclab '-p scripts/reinforcement_learning/rsl_rl/train.py --task=Isaac-Velocity-Rough-Anymal-C-v0'
+  ${SCRIPT_NAME} run --py --gui 'standalone_examples/api/isaacsim.robot.policy.examples/anymal_standalone.py'
+  ${SCRIPT_NAME} run --py --livestream public 'standalone_examples/api/isaacsim.robot.policy.examples/anymal_standalone.py'
   ${SCRIPT_NAME} run -- bash -lc 'cd projects/my-project && python train.py'
   ROS_INSTALL_VARIANT=desktop ${SCRIPT_NAME} install ros2
   ${SCRIPT_NAME} install docker --log-file /tmp/isaac-bootstrap.log
@@ -2335,6 +2339,220 @@ run_in_isaac_container() {
   return "$run_status"
 }
 
+prepare_isaacsim_livestream_wrapper() {
+  local wrapper_file
+  wrapper_file=$(mktemp "${TMPDIR:-/tmp}/isaac-vmctl-stream-wrapper.XXXXXX.py")
+  cat >"$wrapper_file" <<'EOF_STREAM_WRAPPER'
+import os
+import platform
+import runpy
+import sys
+
+if platform.machine().lower() in ["aarch64", "arm64"]:
+    print("Livestream is not supported on ARM64 architecture. Exiting.", flush=True)
+    sys.exit(0)
+
+from isaacsim import SimulationApp as _BaseSimulationApp
+
+CONFIG = {
+    "width": 1280,
+    "height": 720,
+    "window_width": 1920,
+    "window_height": 1080,
+    "headless": True,
+    "hide_ui": False,
+    "renderer": "RaytracedLighting",
+    "display_options": 3286,
+}
+
+app = _BaseSimulationApp(launch_config=CONFIG)
+
+from isaacsim.core.utils.extensions import enable_extension
+import isaacsim
+
+signal_port = int(os.environ.get("ISAAC_VMCTL_STREAM_SIGNAL_PORT", "49100"))
+stream_port = int(os.environ.get("ISAAC_VMCTL_STREAM_PORT", "47998"))
+public_ip = os.environ.get("ISAAC_VMCTL_PUBLIC_IP", "")
+
+app.set_setting("/app/window/drawMouse", True)
+app.set_setting("/app/livestream/port", signal_port)
+if public_ip:
+    app.set_setting("/app/livestream/publicEndpointAddress", public_ip)
+app.set_setting("/exts/omni.kit.livestream.app/primaryStream/signalPort", signal_port)
+app.set_setting("/exts/omni.kit.livestream.app/primaryStream/streamPort", stream_port)
+if public_ip:
+    app.set_setting("/exts/omni.kit.livestream.app/primaryStream/publicIp", public_ip)
+
+enable_extension("omni.services.livestream.nvcf")
+
+
+def _existing_app(*_args, **_kwargs):
+    return app
+
+
+isaacsim.SimulationApp = _existing_app
+
+target_script = sys.argv[1]
+sys.argv = [target_script, *sys.argv[2:]]
+
+try:
+    runpy.run_path(target_script, run_name="__main__")
+finally:
+    try:
+        app.close()
+    except Exception:
+        pass
+EOF_STREAM_WRAPPER
+  chmod 0644 "$wrapper_file"
+  printf '%s\n' "$wrapper_file"
+}
+
+run_isaacsim_python() {
+  local mode="plain"
+  local livestream_mode="0"
+  local public_ip=""
+  local webrtc_signal_port="$WEBRTC_SIGNAL_PORT"
+  local webrtc_stream_port="$WEBRTC_STREAM_PORT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --gui|--vnc)
+        [[ "$livestream_mode" == "0" ]] || error "Use either --gui or --livestream with 'run --py', not both."
+        mode="gui"
+        shift
+        ;;
+      --headless)
+        [[ "$livestream_mode" == "0" ]] || error "Use either --headless or --livestream with 'run --py', not both."
+        mode="plain"
+        shift
+        ;;
+      --webrtc|--streaming)
+        [[ "$mode" != "gui" ]] || error "Use either --gui or --livestream with 'run --py', not both."
+        mode="webrtc"
+        livestream_mode="1"
+        shift
+        ;;
+      --livestream)
+        [[ $# -ge 2 ]] || error "--livestream requires 'public' or 'private'."
+        [[ "$mode" != "gui" ]] || error "Use either --gui or --livestream with 'run --py', not both."
+        mode="webrtc"
+        case "$2" in
+          public) livestream_mode="1" ;;
+          private) livestream_mode="2" ;;
+          *) error "--livestream must be 'public' or 'private'." ;;
+        esac
+        shift 2
+        ;;
+      --public-ip)
+        [[ $# -ge 2 ]] || error "--public-ip requires an IPv4 or hostname value."
+        public_ip="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [[ $# -gt 0 ]] || error "Usage: ${SCRIPT_NAME} run --py [--gui|--livestream public|private [--public-ip <ip>]] '<python.sh args>'"
+
+  local -a python_args=()
+  if [[ $# -eq 1 ]]; then
+    mapfile -t python_args < <(parse_shell_words "$1")
+  else
+    python_args=("$@")
+  fi
+  (( ${#python_args[@]} > 0 )) || error "Isaac Sim python.sh arguments resolved to an empty command."
+
+  require_supported_host
+  init_paths
+  verify_nvidia_container_runtime
+  ensure_isaac_dirs
+  ensure_isaac_image
+  local isaac_tag
+  isaac_tag="${ISAAC_IMAGE##*:}"
+  if [[ "$livestream_mode" != "0" ]]; then
+    if [[ "$isaac_tag" == 5.* ]]; then
+      if [[ "$WEBRTC_SIGNAL_PORT" != "49100" || "$WEBRTC_STREAM_PORT" != "47998" ]]; then
+        warn "Isaac Sim ${isaac_tag} standalone python WebRTC uses the fixed default ports 49100/tcp and 47998/udp. Ignoring WEBRTC_SIGNAL_PORT=${WEBRTC_SIGNAL_PORT} and WEBRTC_STREAM_PORT=${WEBRTC_STREAM_PORT} for 'run --py --livestream'."
+      fi
+      webrtc_signal_port=49100
+      webrtc_stream_port=47998
+    fi
+    configure_ufw_if_active
+    if [[ "$livestream_mode" == "1" && -z "$public_ip" ]]; then
+      public_ip=$(get_public_ip)
+    fi
+  elif [[ -n "$public_ip" ]]; then
+    error "--public-ip only applies with 'run --py --livestream ...'."
+  fi
+
+  build_common_docker_args
+  DOCKER_RUN_ARGS+=(-e "TERM=xterm")
+  if [[ "$mode" == "gui" ]]; then
+    prepare_gui_x11_access
+    append_gui_docker_args
+  fi
+
+  info "Running Isaac Sim python.sh command from ${ISAAC_IMAGE} (${mode})..."
+  info "Workspace: ${HOST_WORKSPACE_ROOT} -> ${CONTAINER_WORKSPACE}"
+  if [[ "$mode" == "gui" ]]; then
+    info "Isaac Sim GUI will open on ${GUI_DISPLAY}. Run this from the terminal inside TigerVNC when you want the viewport there."
+  elif [[ "$livestream_mode" == "1" ]]; then
+    info "Isaac Sim WebRTC client target: ${public_ip}"
+    info "Required ports on the host: ${webrtc_signal_port}/tcp and ${webrtc_stream_port}/udp"
+    info "This path is meant for standard Isaac Sim standalone examples."
+  elif [[ "$livestream_mode" == "2" ]]; then
+    if [[ -n "$public_ip" ]]; then
+      info "Configured reachable WebRTC client target: ${public_ip}"
+    else
+      info "Use the host IP reachable from your laptop in the Isaac Sim WebRTC client."
+    fi
+    info "Required ports on the host: ${webrtc_signal_port}/tcp and ${webrtc_stream_port}/udp"
+    info "This path is meant for standard Isaac Sim standalone examples."
+  else
+    info "This runs the plain python.sh command without attaching to the current X display."
+  fi
+
+  local wrapper_file=""
+  local wrapper_container_file="/tmp/isaac-vmctl-stream-wrapper.py"
+  local -a python_launch_args=("${python_args[@]}")
+  if [[ "$livestream_mode" != "0" ]]; then
+    [[ "${python_args[0]}" != -* ]] || error "'run --py --livestream' currently supports script-path invocations, not python options like '${python_args[0]}'."
+    wrapper_file=$(prepare_isaacsim_livestream_wrapper)
+    DOCKER_RUN_ARGS+=(
+      -e "ISAAC_VMCTL_STREAM_SIGNAL_PORT=${webrtc_signal_port}"
+      -e "ISAAC_VMCTL_STREAM_PORT=${webrtc_stream_port}"
+      -v "${wrapper_file}:${wrapper_container_file}:ro"
+    )
+    if [[ -n "$public_ip" ]]; then
+      DOCKER_RUN_ARGS+=(-e "ISAAC_VMCTL_PUBLIC_IP=${public_ip}")
+    fi
+    python_launch_args=("${wrapper_container_file}" "${python_args[@]}")
+  fi
+  local python_launch_cmd=""
+  printf -v python_launch_cmd '%q ' "${python_launch_args[@]}"
+  python_launch_cmd=${python_launch_cmd% }
+
+  local run_status=0
+  if run_docker_attached "isaacpy-run" \
+    "${DOCKER_RUN_ARGS[@]}" \
+    --entrypoint bash \
+    "$ISAAC_IMAGE" \
+    -lc "cd /isaac-sim && ./python.sh ${python_launch_cmd}"; then
+    run_status=0
+  else
+    run_status=$?
+  fi
+  if [[ -n "$wrapper_file" ]]; then
+    rm -f "$wrapper_file"
+  fi
+  return "$run_status"
+}
+
 run_isaaclab() {
   local custom_path=""
   while [[ $# -gt 0 ]]; do
@@ -2549,6 +2767,10 @@ main() {
     run)
       shift
       case "${1:-}" in
+        --py)
+          shift
+          run_isaacsim_python "$@"
+          ;;
         isaaclab)
           shift
           run_isaaclab "$@"
